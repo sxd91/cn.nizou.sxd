@@ -5,7 +5,6 @@ import cn.nizou.sxd.util.DexKitLocator
 import cn.nizou.sxd.util.SimianV2AutomationPrefs
 import cn.nizou.sxd.util.logI
 import io.github.libxposed.api.XposedInterface
-import org.luckypray.dexkit.util.getMethodInstance
 
 /** Direct port of SimianV2 QuickAnswerHook: resolve the exact recognition method, then replace its result. */
 class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) : BaseHook(self, classLoader) {
