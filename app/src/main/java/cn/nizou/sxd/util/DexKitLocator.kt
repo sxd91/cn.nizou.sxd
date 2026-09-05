@@ -95,6 +95,14 @@ object DexKitLocator {
         }
     }
 
+    fun findMethods(paramTypeNames: List<String?>, usingStrings: List<String> = emptyList()) = runCatching {
+        val b = bridge ?: return@runCatching emptyList()
+        b.findMethod { matcher { paramTypes(*paramTypeNames.toTypedArray()); if (usingStrings.isNotEmpty()) usingStrings(usingStrings, StringMatchType.Equals) } }
+    }.getOrElse {
+        logI("DexKitLocator method search failed")
+        emptyList()
+    }
+
     /** 便捷：定位唯一类名；不唯一/失败返回 null。 */
     fun findClassName(
         paramTypeNames: List<String?>,

@@ -38,6 +38,8 @@ object LogOverlayWindow {
     private val overlays = WeakHashMap<Activity, View>()
     private val installedApps = WeakHashMap<Application, Boolean>()
     private val outputs = mutableListOf<WeakReference<TextView>>()
+    private var hostApplication: WeakReference<Application>? = null
+    private var resumedActivity: WeakReference<Activity>? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
         override fun run() {
@@ -69,10 +71,12 @@ object LogOverlayWindow {
     /** Registers exactly once during host attach and reconnects the panel on every Activity resume. */
     fun install(application: Application) {
         if (application.packageName != HOST_PACKAGE) return
+        hostApplication = WeakReference(application)
         enabled = isEnabled(application)
         if (installedApps.put(application, true) != null) return
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                resumedActivity = WeakReference(activity)
                 if (enabled) {
                     // Post after the resumed DecorView is attached; this also reattaches after back navigation.
                     activity.window.decorView.post { attachTo(activity) }
@@ -99,10 +103,10 @@ object LogOverlayWindow {
         context.applicationContext.getSharedPreferences(MODULE_PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(PREFS_KEY_OVERLAY, enable).apply()
         if (enable) {
-            val activity = findActivity(context) ?: return false
+            val activity = findActivity(context) ?: resumedActivity?.get() ?: return false
             attachTo(activity)
         } else {
-            hide()
+            removeAllOverlays()
         }
         return true
     }
@@ -129,6 +133,12 @@ object LogOverlayWindow {
     fun hide() {
         enabled = false
         minimized = false
+        hostApplication?.get()?.getSharedPreferences(MODULE_PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean(PREFS_KEY_OVERLAY, false)?.apply()
+        removeAllOverlays()
+    }
+
+    private fun removeAllOverlays() {
         mainHandler.removeCallbacks(refreshRunnable)
         runOnMain {
             overlays.values.toList().forEach { (it.parent as? ViewGroup)?.removeView(it) }

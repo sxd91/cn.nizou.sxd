@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import cn.nizou.sxd.ui.content.nukex.NukeModuleTheme
 import cn.nizou.sxd.ui.content.nukex.NukePageScaffold
 import cn.nizou.sxd.ui.content.nukex.NukePreferenceRow
@@ -14,6 +15,7 @@ import cn.nizou.sxd.ui.content.nukex.NukeSettingGroup
 import cn.nizou.sxd.ui.content.nukex.NukeSwitchRow
 import cn.nizou.sxd.ui.theme.SettingsUiEngine
 import cn.nizou.sxd.ui.theme.ThemeSettings
+import cn.nizou.sxd.util.LogOverlayWindow
 import cn.nizou.sxd.util.SettingsPrefs
 import cn.nizou.sxd.util.SimianV2AutomationPrefs
 
@@ -29,6 +31,8 @@ fun NukeInjectedScreen(onFinish: () -> Unit) {
                         NukePage.HOME -> NukeHome { page = it }
                         NukePage.AUTOMATION -> NukeAutomation()
                         NukePage.DEBUG -> NukeDebug()
+                        NukePage.GENERAL -> NukeGeneral()
+                        NukePage.CUSTOM -> NukeCustomFeatures()
                         NukePage.APPEARANCE -> NukeAppearance()
                     }
                 }
@@ -37,7 +41,7 @@ fun NukeInjectedScreen(onFinish: () -> Unit) {
     }
 }
 
-private enum class NukePage(val title: String) { HOME("老挂戏老叟"), AUTOMATION("SimianV2 自动化"), DEBUG("调试"), APPEARANCE("界面") }
+private enum class NukePage(val title: String) { HOME("老挂戏老叟"), GENERAL("通用"), AUTOMATION("SimianV2 自动化"), CUSTOM("自定义功能"), DEBUG("调试"), APPEARANCE("界面") }
 
 private fun frameworkStatus(): String = runCatching {
     val companion = Class.forName("cn.nizou.sxd.XposedInit\$Companion")
@@ -51,8 +55,10 @@ private fun frameworkStatus(): String = runCatching {
 @Composable private fun NukeHome(open: (NukePage) -> Unit) {
     NukeSettingGroup("模块") {
         NukePreferenceRow("注入环境", frameworkStatus())
+        NukePreferenceRow("通用", "正确识别与昵称设置", onClick = { open(NukePage.GENERAL) })
         NukePreferenceRow("SimianV2 自动化", "正确答案、自动笔画、开心收下、继续、继续 PK", onClick = { open(NukePage.AUTOMATION) })
-        NukePreferenceRow("调试", "实时日志悬浮窗与运行日志", onClick = { open(NukePage.DEBUG) })
+        NukePreferenceRow("自定义功能", "答案、题目、结算时间与分数", onClick = { open(NukePage.CUSTOM) })
+        NukePreferenceRow("调试与日志", "实时日志悬浮窗与抓包", onClick = { open(NukePage.DEBUG) })
         NukePreferenceRow("界面", "主题与 UI 引擎", onClick = { open(NukePage.APPEARANCE) })
     }
 }
@@ -74,11 +80,36 @@ private fun frameworkStatus(): String = runCatching {
     }
 }
 
+
+@Composable private fun NukeGeneral() {
+    var alwaysTrue by remember { mutableStateOf(SettingsPrefs.readBoolean("always_true_answer", true)) }
+    var nickname by remember { mutableStateOf(SettingsPrefs.readBoolean("remove_restriction_on_nickname", true)) }
+    NukeSettingGroup("通用") {
+        NukeSwitchRow("一切输入视为正确答案", "旧识别链路兼容开关", alwaysTrue) { alwaysTrue = it; SettingsPrefs.writeBoolean("always_true_answer", it) }
+        NukeSwitchRow("无视名字限制", "放开昵称长度与字符限制", nickname) { nickname = it; SettingsPrefs.writeBoolean("remove_restriction_on_nickname", it) }
+    }
+}
+
+@Composable private fun NukeCustomFeatures() {
+    var answer by remember { mutableStateOf(SettingsPrefs.readBoolean("modify_answer", false)) }
+    var title by remember { mutableStateOf(SettingsPrefs.readBoolean("modify_title", false)) }
+    var settle by remember { mutableStateOf(SettingsPrefs.readBoolean("pk_settle_enabled", false)) }
+    NukeSettingGroup("自定义答案") {
+        NukeSwitchRow("改答案", "使用自定义答案配置", answer) { answer = it; SettingsPrefs.writeBoolean("modify_answer", it) }
+        NukeSwitchRow("改题目", "使用自定义题目配置", title) { title = it; SettingsPrefs.writeBoolean("modify_title", it) }
+    }
+    NukeSettingGroup("结算与分数") {
+        NukeSwitchRow("自定义结算时间", "对战提交使用自定义 costTime", settle) { settle = it; SettingsPrefs.writeBoolean("pk_settle_enabled", it) }
+        NukePreferenceRow("自定义分数", "复用既有分数功能配置")
+    }
+}
+
 @Composable private fun NukeDebug() {
+    val context = LocalContext.current
     var overlay by remember { mutableStateOf(SettingsPrefs.readBoolean("log_overlay_enabled", false)) }
     var debug by remember { mutableStateOf(SettingsPrefs.readBoolean("debug", false)) }
     NukeSettingGroup("运行") {
-        NukeSwitchRow("实时日志悬浮窗", "跟随宿主 Activity，返回后自动重挂", overlay) { overlay = it; SettingsPrefs.writeBoolean("log_overlay_enabled", it) }
+        NukeSwitchRow("实时日志悬浮窗", "跟随宿主 Activity，返回后自动重挂", overlay) { enabled -> overlay = enabled; LogOverlayWindow.setEnabled(context, enabled) }
         NukeSwitchRow("DEBUG", "输出额外 Hook 运行日志", debug) { debug = it; SettingsPrefs.writeBoolean("debug", it) }
     }
 }
