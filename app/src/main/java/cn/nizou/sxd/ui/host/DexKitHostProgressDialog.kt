@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,7 +62,7 @@ internal object DexKitHostProgressDialog {
 
 @Composable
 private fun DexKitProgressContent(onDone: () -> Unit) {
-    var state by mutableStateOf(DexKitCoordinator.progress)
+    var state by remember { mutableStateOf(DexKitCoordinator.progress) }
     DisposableEffect(Unit) {
         val listener: (DexKitCoordinator.Progress) -> Unit = { next -> state = next }
         DexKitCoordinator.addListener(listener)
