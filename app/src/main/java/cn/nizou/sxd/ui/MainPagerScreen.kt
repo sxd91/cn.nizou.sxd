@@ -256,10 +256,7 @@ private fun MainPager(
                     0 -> HomeTab(res, onNavigate = onNavigate, onBack = onBackAtRoot)
                     1 -> FeaturesTab(res, onNavigate = onNavigate, onBack = onBackAtRoot)
                     2 -> LogsScreen(res, onBack = onBackAtRoot)
-                    else -> when (ThemeSettings.uiEngine) {
-                        cn.nizou.sxd.ui.theme.SettingsUiEngine.MATERIAL3 -> SettingsScreen(onBack = onBackAtRoot)
-                        cn.nizou.sxd.ui.theme.SettingsUiEngine.NUKE -> NukeSettingsScreen(onBack = onBackAtRoot)
-                    }
+                    else -> SettingsScreen(onBack = onBackAtRoot)
                 }
             }
         }
