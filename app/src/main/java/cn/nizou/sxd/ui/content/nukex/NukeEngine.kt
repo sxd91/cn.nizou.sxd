@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,8 +53,9 @@ fun NukeModuleTheme(dark: Boolean, accent: Color, content: @Composable () -> Uni
 
 @Composable
 fun NukePageScaffold(title: String, onBack: () -> Unit, content: LazyListScope.() -> Unit) {
+    val statusTop = androidx.compose.foundation.layout.WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     Column(Modifier.fillMaxSize().background(NukeTheme.colors.background)) {
-        Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(64.dp + statusTop).padding(top = statusTop, start = 18.dp, end = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("‹", color = NukeTheme.colors.accent, fontSize = 38.sp, modifier = Modifier.size(44.dp).clickable { onBack() })
             Spacer(Modifier.width(6.dp)); Text(title, color = NukeTheme.colors.textPrimary, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
         }
