@@ -34,7 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import cn.nizou.sxd.BuildConfig
 import cn.nizou.sxd.HOST_PACKAGE_NAME
-import cn.nizou.sxd.ui.components.HookStatusCard
+import cn.nizou.sxd.ui.components.ModuleServiceStatusCard
 import cn.nizou.sxd.util.ConfigActions
 import cn.nizou.sxd.util.StringRes
 import cn.nizou.sxd.util.openGithub
@@ -102,7 +102,7 @@ fun ModuleMainScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 激活卡片（绿=已注入宿主，红=未激活）
-            HookStatusCard()
+            ModuleServiceStatusCard()
 
             // 打开宿主（小猿口算）
             LauncherCard(

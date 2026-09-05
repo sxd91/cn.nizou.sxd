@@ -30,7 +30,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.nizou.sxd.BuildConfig
 import cn.nizou.sxd.HOST_PACKAGE_NAME
-import cn.nizou.sxd.XposedInit
 import cn.nizou.sxd.ui.animation.predictiveback.weKitNavTransition
 import cn.nizou.sxd.ui.components.BaseWidget
 import cn.nizou.sxd.ui.components.HookStatusCard
@@ -51,8 +50,8 @@ import cn.nizou.sxd.ui.settings.CustomSettleScreen
 import cn.nizou.sxd.ui.settings.DebugScreen
 import cn.nizou.sxd.ui.settings.GeneralScreen
 import cn.nizou.sxd.ui.settings.LogsScreen
+import cn.nizou.sxd.ui.settings.NukeSettingsScreen
 import cn.nizou.sxd.ui.settings.PkScreen
-import cn.nizou.sxd.ui.settings.PracticeScreen
 import cn.nizou.sxd.ui.settings.SettingsScreen
 import cn.nizou.sxd.ui.theme.AutoOralTheme
 import cn.nizou.sxd.ui.theme.ThemeSettings
@@ -96,8 +95,6 @@ sealed interface MainRoute : NavKey {
     data object Main : MainRoute
     @Serializable
     data object General : MainRoute
-    @Serializable
-    data object Practice : MainRoute
     @Serializable
     data object Pk : MainRoute
     @Serializable
@@ -177,9 +174,6 @@ fun MainPagerScreen(
                 entry<MainRoute.General>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                     GeneralScreen(res, onBack = { navigator.pop() })
                 }
-                entry<MainRoute.Practice>(swipeDismiss = NavSwipeDirection.LeftToRight) {
-                    PracticeScreen(res, onBack = { navigator.pop() })
-                }
                 entry<MainRoute.Pk>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                     PkScreen(res, onBack = { navigator.pop() })
                 }
@@ -252,7 +246,10 @@ private fun MainPager(
                     0 -> HomeTab(res, onNavigate = onNavigate, onBack = onBackAtRoot)
                     1 -> FeaturesTab(res, onNavigate = onNavigate, onBack = onBackAtRoot)
                     2 -> LogsScreen(res, onBack = onBackAtRoot)
-                    else -> SettingsScreen(onBack = onBackAtRoot)
+                    else -> when (ThemeSettings.uiEngine) {
+                        cn.nizou.sxd.ui.theme.SettingsUiEngine.MATERIAL3 -> SettingsScreen(onBack = onBackAtRoot)
+                        cn.nizou.sxd.ui.theme.SettingsUiEngine.NUKE -> NukeSettingsScreen(onBack = onBackAtRoot)
+                    }
                 }
             }
         }
@@ -347,12 +344,7 @@ private fun deviceInfoEntries(): List<HomeInfoEntry> {
             context.packageManager.getPackageInfo(HOST_PACKAGE_NAME, 0)
         }.getOrNull()
     }
-    val frameworkInfo = remember {
-        runCatching {
-            val self = XposedInit.self
-            "API ${self.apiVersion} · ${self.frameworkName}"
-        }.getOrNull()
-    }
+    val frameworkInfo = remember { readInjectedFrameworkInfo() }
     return listOf(
         HomeInfoEntry("加载环境", frameworkInfo ?: "未检测到框架（独立打开）"),
         HomeInfoEntry(
@@ -371,6 +363,16 @@ private fun deviceInfoEntries(): List<HomeInfoEntry> {
         HomeInfoEntry("安卓版本", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"),
     )
 }
+
+/** Reads the host-only Xposed module through reflection so launcher bytecode stays standalone-safe. */
+private fun readInjectedFrameworkInfo(): String? = runCatching {
+    val companion = Class.forName("cn.nizou.sxd.XposedInit\$Companion")
+    val self = companion.getField("self").get(null) ?: return null
+    val type = self.javaClass
+    val apiVersion = type.methods.first { it.name == "getApiVersion" && it.parameterCount == 0 }.invoke(self)
+    val frameworkName = type.methods.first { it.name == "getFrameworkName" && it.parameterCount == 0 }.invoke(self)
+    "API $apiVersion · $frameworkName"
+}.getOrNull()
 
 private fun formatBuildTime(epochMillis: Long): String {
     val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
@@ -400,6 +402,7 @@ private fun FeaturesTab(
     val entries = remember {
         listOf(
             FeatureMenuEntry("通用", "识别/昵称通用开关", MaterialSymbols.Outlined.Tune, MainRoute.General),
+            FeatureMenuEntry("PK 自动化", "快速答题与统一循环 PK", MaterialSymbols.Outlined.Bolt, MainRoute.Pk),
             FeatureMenuEntry("Debug", "调试开关", MaterialSymbols.Outlined.Bug_report, MainRoute.Debug),
             FeatureMenuEntry("关于", "版本与项目信息", MaterialSymbols.Outlined.Info, MainRoute.About),
         )
@@ -409,12 +412,6 @@ private fun FeaturesTab(
             FeatureMenuEntry("自定义分数", "刷取指定分数", MaterialSymbols.Outlined.Exposure_plus_1, MainRoute.CustomScore),
             FeatureMenuEntry("自定义答案", "改题目/改答案/口算答案", MaterialSymbols.Outlined.Edit, MainRoute.CustomAnswer),
             FeatureMenuEntry("自定义结算时间", "极速结算/自定义 costTime", MaterialSymbols.Outlined.Timer, MainRoute.CustomSettle),
-        )
-    }
-    val experimentalEntries = remember {
-        listOf(
-            FeatureMenuEntry("练习", "口算练习自动答题（实验）", MaterialSymbols.Outlined.Edit_note, MainRoute.Practice),
-            FeatureMenuEntry("PK", "极速/PK 自动答题（实验）", MaterialSymbols.Outlined.Bolt, MainRoute.Pk),
         )
     }
 
@@ -457,22 +454,6 @@ private fun FeaturesTab(
                         SettingsPrefs.writeBoolean(res, res.KEY_PK_SKIP_RANKING, it)
                     }
                 )
-                experimentalEntries.forEach { entry ->
-                    BaseWidget(
-                        title = entry.title,
-                        description = entry.description,
-                        icon = entry.icon,
-                        onClick = { onNavigate(entry.route) },
-                        trailingContent = {
-                            Icon(
-                                imageVector = MaterialSymbols.Outlined.Chevron_right,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        },
-                    )
-                }
             }
         }
         item {

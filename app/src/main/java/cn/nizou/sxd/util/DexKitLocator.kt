@@ -105,3 +105,43 @@ object DexKitLocator {
         return if (names.size == 1) names.first() else null
     }
 }
+
+/** Host-startup DexKit state stream. UI observes it; parsing never waits for UI. */
+object DexKitCoordinator {
+    enum class Phase { IDLE, RESOLVING, SUCCESS, FAILED }
+    data class Progress(
+        val phase: Phase = Phase.IDLE,
+        val task: String = "等待解析",
+        val completed: Int = 0,
+        val total: Int = 1,
+        val detail: String? = null,
+    )
+
+    @Volatile private var started = false
+    @Volatile var progress: Progress = Progress()
+        private set
+    private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Progress) -> Unit>()
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    fun addListener(listener: (Progress) -> Unit) { listeners += listener; listener(progress) }
+    fun removeListener(listener: (Progress) -> Unit) { listeners -= listener }
+    private fun publish(next: Progress) {
+        progress = next
+        mainHandler.post { listeners.forEach { it(next) } }
+    }
+
+    @Synchronized fun start(apkPath: String): Boolean {
+        if (started) return false
+        started = true
+        publish(Progress(Phase.RESOLVING, "正在建立 DexKit 索引", 0, 1))
+        kotlin.concurrent.thread(name = "AutoOral-DexKit", isDaemon = true) {
+            val ready = DexKitLocator.init(apkPath)
+            if (ready) {
+                publish(Progress(Phase.SUCCESS, "DexKit 解析完成", 1, 1))
+            } else {
+                publish(Progress(Phase.FAILED, "DexKit 初始化失败，已回退签名定位", 1, 1, "不影响宿主继续启动"))
+            }
+        }
+        return true
+    }
+}

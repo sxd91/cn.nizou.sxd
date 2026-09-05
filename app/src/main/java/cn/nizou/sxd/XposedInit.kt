@@ -1,6 +1,8 @@
 package cn.nizou.sxd
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.os.Bundle
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.util.Log
@@ -8,9 +10,10 @@ import cn.nizou.sxd.HOST_PACKAGE_NAME
 import cn.nizou.sxd.MODULE_PREFS_NAME
 import cn.nizou.sxd.hook.BaseHook
 import cn.nizou.sxd.util.ActivityProxy
-import cn.nizou.sxd.util.DexKitLocator
+import cn.nizou.sxd.util.DexKitCoordinator
 import cn.nizou.sxd.util.HookStatus
 import cn.nizou.sxd.util.XposedHelpers
+import cn.nizou.sxd.ui.host.DexKitHostProgressDialog
 import cn.nizou.sxd.util.crash.JavaCrashHandler
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
@@ -106,21 +109,28 @@ class XposedInit : XposedModule() {
                                 moduleCl = XposedInit::class.java.classLoader!!,
                                 hostCl = appClassLoader,
                             )
+                            // Follow resumed host activities instead of holding a stale dialog window.
+                            cn.nizou.sxd.util.LogOverlayWindow.install(app)
                         }
                     }.onFailure { Log.e("AutoOral", "ActivityProxy init failed", it) }
-                    // DexKit 索引初始化（版本适配兜底：类名/方法名混淆时按签名+字符串引用定位，
-                    // 见 skill 05 §8）。DexKit 2.0 需要宿主 APK 路径；首次建索引走后台线程，
-                    // 不阻塞 hook；失败不影响主流程。
-                    kotlin.concurrent.thread {
-                        runCatching {
-                            val ctx = chain.thisObject as? android.content.Context
-                            val apkPath = ctx?.packageManager
-                                ?.getApplicationInfo(HOST_PACKAGE_NAME, 0)?.sourceDir
-                            if (apkPath != null && DexKitLocator.init(apkPath)) {
-                                Log.i("AutoOral", "DexKit ready: $apkPath")
-                            }
-                        }.onFailure { Log.e("AutoOral", "DexKit init failed", it) }
-                    }
+                    // npatch/LSPosed: postpone DexKit JNI loading until the first real host Activity.
+                    // The Compose card mirrors WeKit's state/progress model and closes itself automatically.
+                    val dexKitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+                    val appContext = chain.thisObject as? android.app.Application
+                    appContext?.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
+                        override fun onActivityCreated(activity: Activity, state: Bundle?) {
+                            if (!dexKitStarted.compareAndSet(false, true)) return
+                            val apkPath = activity.applicationInfo.sourceDir
+                            DexKitCoordinator.start(apkPath)
+                            activity.window.decorView.post { DexKitHostProgressDialog.show(activity) }
+                        }
+                        override fun onActivityStarted(activity: Activity) = Unit
+                        override fun onActivityResumed(activity: Activity) = Unit
+                        override fun onActivityPaused(activity: Activity) = Unit
+                        override fun onActivityStopped(activity: Activity) = Unit
+                        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+                        override fun onActivityDestroyed(activity: Activity) = Unit
+                    })
                     // 宿主注入成功后写入激活标记（此时 getRemotePreferences 已就绪）：
                     // 供模块设置页/注入面板读取。写入此位置可避免 onPackageReady 早期 RemotePreferences
                     // 未就绪导致写入被静默吞掉（真机 hook_active 缺失，卡片误显未激活）。

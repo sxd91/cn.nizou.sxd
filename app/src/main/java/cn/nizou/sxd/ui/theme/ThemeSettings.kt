@@ -20,7 +20,7 @@ import com.materialkolor.dynamiccolor.ColorSpec
  * 与 wekit 的区别：
  *  - 持久化用本项目 `SettingsPrefs`（模块 prefs `auto_oral_calculation`，键 `theme_xxx`），
  *    不用 wekit 的 WePrefs/MMKV；
- *  - `SettingsUiEngine` 只保留 MATERIAL3（本项目没有 Nuke 引擎）；
+ *  - `SettingsUiEngine` 支持 Material 3 与 Nuke；两者复用同一份持久化配置。
  *  - 默认 seed 保留模块绿 0xFF2E7D32（wekit 是微信绿 0xFF07C160）。
  *
  * 所有状态都是 Compose 可观察状态（mutableStateOf 种子值来自 prefs），设置行改动即时换肤；
@@ -204,17 +204,15 @@ enum class PageTransitionAnimation {
     }
 }
 
-/**
- * 设置 UI 引擎。本项目只有 Compose Material3 一套 UI，不保留 wekit 的 Nuke 引擎；
- * 兼容读取旧配置里的 "MIUIX"/"Miuix"/"NUKE" 名称。
- */
+/** 设置 UI 引擎：Material 3 为默认，Nuke 使用 WeKit 同源的紧凑设置组件。 */
 enum class SettingsUiEngine(val displayName: String) {
-    MATERIAL3("Material 3");
+    MATERIAL3("Material 3"),
+    NUKE("Nuke");
 
     companion object {
         fun fromName(value: String?): SettingsUiEngine = when (value) {
-            // legacy names written by older builds / wekit configs
-            "MIUIX", "Miuix", "NUKE" -> MATERIAL3
+            "NUKE" -> NUKE
+            "MATERIAL3", "MIUIX", "Miuix", null -> MATERIAL3
             else -> MATERIAL3
         }
     }

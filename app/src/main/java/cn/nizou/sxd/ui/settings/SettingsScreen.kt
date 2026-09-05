@@ -18,6 +18,7 @@ import cn.nizou.sxd.ui.theme.AppColorSpec
 import cn.nizou.sxd.ui.theme.AppPaletteStyle
 import cn.nizou.sxd.ui.theme.AppThemeMode
 import cn.nizou.sxd.ui.theme.PageTransitionAnimation
+import cn.nizou.sxd.ui.theme.SettingsUiEngine
 import cn.nizou.sxd.ui.theme.ThemeSettings
 import cn.nizou.sxd.util.ConfigActions
 import cn.nizou.sxd.util.openGithub
@@ -127,10 +128,13 @@ private fun ThemeSection() {
     val context = LocalContext.current
 
     SegmentedColumn(title = "界面") {
-        BaseWidget(
+        DropDownMenuWidget(
             icon = MaterialSymbols.Outlined.Style,
             title = "UI 组件引擎",
-            description = "Material 3",
+            description = "切换设置页组件引擎",
+            value = ThemeSettings.uiEngine,
+            options = SettingsUiEngine.entries.map { DropdownOption(it, it.displayName) },
+            onValueChange = ThemeSettings::updateUiEngine,
         )
 
         DropDownMenuWidget(
