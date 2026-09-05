@@ -111,6 +111,9 @@ object LogOverlayWindow {
         return true
     }
 
+    /** SimianV2-equivalent explicit reattachment point; also called from the direct Activity resume hook. */
+    fun attachToResumedActivity(activity: Activity) = attachTo(activity)
+
     private fun attachTo(activity: Activity) = runOnMain {
         if (!enabled || activity.isFinishing || activity.isDestroyed || overlays.containsKey(activity)) return@runOnMain
         overlays.keys.filter { it !== activity }.toList().forEach { old ->

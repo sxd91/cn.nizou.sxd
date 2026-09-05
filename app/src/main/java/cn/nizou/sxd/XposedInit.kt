@@ -98,6 +98,19 @@ class XposedInit : XposedModule() {
                 val r = chain.proceed()
                 try {
                     BaseHook.startHook(this, appClassLoader)
+                    // ActivityProxy can bypass Application callback delivery for its borrowed Activity shell.
+                    // Hook the framework Activity resume path as the same direct reattach trigger Simian relies on.
+                    runCatching {
+                        val resume = Activity::class.java.getDeclaredMethod("onResume")
+                        hook(resume).setId("simian_overlay_activity_resume").intercept { resumeChain ->
+                            val result = resumeChain.proceed()
+                            val activity = resumeChain.thisObject as? Activity
+                            if (activity?.application?.packageName == HOST_PACKAGE_NAME) {
+                                cn.nizou.sxd.util.LogOverlayWindow.attachToResumedActivity(activity)
+                            }
+                            result
+                        }
+                    }.onFailure { Log.e("AutoOral", "overlay resume hook failed", it) }
                     // ActivityProxy 借壳引擎：让模块 HostSettingsActivity 寄生宿主进程运行
                     // （真 Activity 转场动画/预测返回）。必须在宿主 Application.attach 后、
                     // 任何模块 Activity 启动前初始化；失败不影响其余 hook。

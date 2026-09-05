@@ -18,16 +18,33 @@ internal object SimianV2PkAutomation {
 
     fun scheduleStroke(webView: WebView, delay: Long) = schedule(Task.STROKE, webView, delay, "提交笔画") {
         val started = System.currentTimeMillis()
-        val json = JSONArray().apply { points.forEachIndexed { index, point -> put(JSONObject().put("x",point.x).put("y",point.y).put("pressure",0).put("time",started + index * 8L)) } }
+        val json = JSONArray().apply {
+            points.forEachIndexed { index, point ->
+                put(JSONObject().apply {
+                    put("x", point.x.toDouble())
+                    put("y", point.y.toDouble())
+                    put("pressure", 0)
+                    put("time", started + index * 8L)
+                })
+            }
+        }
+        // Keep the original SimianV2 sequence: load module -> resolve store pad -> assign _data -> endStroke.
         val script = """(() => {
             const points = $json;
-            const submit = pad => {
+            window.__strokeSubmitStatus = { status: 'loading-module', pointCount: points.length };
+            System.import('$PAD_MODULE_URL').then(module => {
+                const store = module.d?.();
+                const pad = store?.pad?.value ?? store?.pad;
                 if (!pad) throw new Error('画板尚未初始化');
-                pad._data = [{points:points,penColor:'#000',minWidth:3,maxWidth:3,velocityFilterWeight:.7,compositeOperation:'source-over'}];
-                pad.dispatchEvent(new CustomEvent('endStroke',{detail:{synthetic:true}}));
-                return 'submitted';
-            };
-            System.import('$PAD_MODULE_URL').then(m => submit(m.d?.()?.pad?.value ?? m.d?.()?.pad ?? window.__pkPad ?? window.pad)).catch(e => console.log('SimianV2 stroke failed:'+e));
+                pad._data = [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
+                window.__strokeSubmitStatus.status = 'dispatching-end-stroke';
+                pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
+                window.__strokeSubmitStatus.status = 'submitted';
+            }).catch(error => {
+                window.__strokeSubmitStatus.status = 'failed';
+                window.__strokeSubmitStatus.error = String(error);
+            });
+            return JSON.stringify(window.__strokeSubmitStatus);
         })();""".trimIndent()
         evaluate(webView, script, "提交笔画")
     }
