@@ -73,14 +73,19 @@ object LogOverlayWindow {
         if (installedApps.put(application, true) != null) return
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
-                if (enabled) attachTo(activity)
+                if (enabled) {
+                    // Post after the resumed DecorView is attached; this also reattaches after back navigation.
+                    activity.window.decorView.post { attachTo(activity) }
+                }
             }
             override fun onActivityDestroyed(activity: Activity) {
                 overlays.remove(activity)?.let { (it.parent as? ViewGroup)?.removeView(it) }
                 cleanOutputs()
             }
             override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
-            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityStarted(activity: Activity) {
+                if (enabled) activity.window.decorView.post { attachTo(activity) }
+            }
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit

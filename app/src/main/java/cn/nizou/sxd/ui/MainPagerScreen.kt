@@ -50,9 +50,10 @@ import cn.nizou.sxd.ui.settings.CustomSettleScreen
 import cn.nizou.sxd.ui.settings.DebugScreen
 import cn.nizou.sxd.ui.settings.GeneralScreen
 import cn.nizou.sxd.ui.settings.LogsScreen
-import cn.nizou.sxd.ui.settings.NukeSettingsScreen
+import cn.nizou.sxd.ui.settings.NukeInjectedScreen
 import cn.nizou.sxd.ui.settings.PkScreen
 import cn.nizou.sxd.ui.settings.SettingsScreen
+import cn.nizou.sxd.ui.settings.SimianV2AutomationScreen
 import cn.nizou.sxd.ui.theme.AutoOralTheme
 import cn.nizou.sxd.ui.theme.ThemeSettings
 import cn.nizou.sxd.util.StringRes
@@ -98,6 +99,8 @@ sealed interface MainRoute : NavKey {
     @Serializable
     data object Pk : MainRoute
     @Serializable
+    data object SimianV2Automation : MainRoute
+    @Serializable
     data object CustomScore : MainRoute
     @Serializable
     data object CustomAnswer : MainRoute
@@ -139,6 +142,10 @@ fun MainPagerScreen(
     res: StringRes,
     onFinish: () -> Unit,
 ) {
+    if (ThemeSettings.uiEngine == cn.nizou.sxd.ui.theme.SettingsUiEngine.NUKE) {
+        NukeInjectedScreen(onFinish)
+        return
+    }
     AutoOralTheme(seedColor = ThemeSettings.seedColor) {
         val backStack = rememberNavBackStack<MainRoute>(MainRoute.Main)
         val navigator = remember(backStack) { Navigator(backStack) }
@@ -176,6 +183,9 @@ fun MainPagerScreen(
                 }
                 entry<MainRoute.Pk>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                     PkScreen(res, onBack = { navigator.pop() })
+                }
+                entry<MainRoute.SimianV2Automation>(swipeDismiss = NavSwipeDirection.LeftToRight) {
+                    SimianV2AutomationScreen(onBack = { navigator.pop() })
                 }
                 entry<MainRoute.CustomScore>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                     CustomScoreScreen(onBack = { navigator.pop() })
@@ -402,7 +412,8 @@ private fun FeaturesTab(
     val entries = remember {
         listOf(
             FeatureMenuEntry("通用", "识别/昵称通用开关", MaterialSymbols.Outlined.Tune, MainRoute.General),
-            FeatureMenuEntry("PK 自动化", "快速答题与统一循环 PK", MaterialSymbols.Outlined.Bolt, MainRoute.Pk),
+            FeatureMenuEntry("PK 自动化", "保留现有 PK 功能", MaterialSymbols.Outlined.Bolt, MainRoute.Pk),
+            FeatureMenuEntry("SimianV2 自动化", "独立的正确答案、笔画与结果页操作", MaterialSymbols.Outlined.Edit_note, MainRoute.SimianV2Automation),
             FeatureMenuEntry("Debug", "调试开关", MaterialSymbols.Outlined.Bug_report, MainRoute.Debug),
             FeatureMenuEntry("关于", "版本与项目信息", MaterialSymbols.Outlined.Info, MainRoute.About),
         )

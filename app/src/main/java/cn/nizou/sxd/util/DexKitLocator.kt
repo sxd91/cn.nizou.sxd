@@ -121,13 +121,21 @@ object DexKitCoordinator {
     @Volatile var progress: Progress = Progress()
         private set
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Progress) -> Unit>()
+    private val readyListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun addListener(listener: (Progress) -> Unit) { listeners += listener; listener(progress) }
     fun removeListener(listener: (Progress) -> Unit) { listeners -= listener }
+    fun addReadyListener(listener: () -> Unit) {
+        readyListeners += listener
+        if (progress.phase == Phase.SUCCESS) mainHandler.post(listener)
+    }
     private fun publish(next: Progress) {
         progress = next
-        mainHandler.post { listeners.forEach { it(next) } }
+        mainHandler.post {
+            listeners.forEach { it(next) }
+            if (next.phase == Phase.SUCCESS) readyListeners.forEach { it() }
+        }
     }
 
     @Synchronized fun start(apkPath: String): Boolean {

@@ -109,7 +109,7 @@ fun HookStatusCard(modifier: Modifier = Modifier) {
     }
     val desc = when {
         activated && manual -> "本进程已手动标记；请确认模块确已在 LSPosed 作用域生效"
-        activated -> "模块已注入小猿口算，功能已生效"
+        activated -> "模块已注入小猿口算 · ${readFrameworkName()}"
         !checked -> "检测中…"
         else -> "点击卡片手动标记激活；或确认 LSPosed 作用域已勾选「小猿口算」并重启"
     }
@@ -200,6 +200,16 @@ private fun readHostHookActive(): Boolean {
  * 表现为模块本体打开即闪退（真机 1.7.13/1.7.14 已复现）。改用反射 `Class.forName`：
  * 宿主进程（框架注入，XposedModule 存在）正常读取；模块本体进程 forName 抛错在 try 内被捕获 → false。
  */
+/** Reads the active framework identity inside the injected process without linking XposedModule in launcher code. */
+private fun readFrameworkName(): String = runCatching {
+    val companion = Class.forName("cn.nizou.sxd.XposedInit" + '$' + "Companion")
+    val self = companion.getField("self").get(null) ?: return "已注入"
+    val type = self.javaClass
+    val name = type.methods.first { it.name == "getFrameworkName" && it.parameterCount == 0 }.invoke(self)
+    val api = type.methods.first { it.name == "getApiVersion" && it.parameterCount == 0 }.invoke(self)
+    "$name · API $api（LSPosed / npatch）"
+}.getOrDefault("已注入（LSPosed / npatch）")
+
 private fun readRemoteActive(): Boolean {
     return runCatching {
         val companion = Class.forName("cn.nizou.sxd.XposedInit\$Companion")

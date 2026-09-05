@@ -109,23 +109,25 @@ class XposedInit : XposedModule() {
                                 moduleCl = XposedInit::class.java.classLoader!!,
                                 hostCl = appClassLoader,
                             )
-                            // Follow resumed host activities instead of holding a stale dialog window.
-                            cn.nizou.sxd.util.LogOverlayWindow.install(app)
                         }
                     }.onFailure { Log.e("AutoOral", "ActivityProxy init failed", it) }
-                    // npatch/LSPosed: postpone DexKit JNI loading until the first real host Activity.
-                    // The Compose card mirrors WeKit's state/progress model and closes itself automatically.
-                    val dexKitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+                    // Keep the Simian-style DecorView overlay independent of ActivityProxy success.
                     val appContext = chain.thisObject as? android.app.Application
+                    appContext?.let { cn.nizou.sxd.util.LogOverlayWindow.install(it) }
+                    // Start/show DexKit at the first resumed host Activity. Creation can occur before
+                    // callbacks are registered on several hosts, while resumed is always observed.
+                    val dexKitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
                     appContext?.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
-                        override fun onActivityCreated(activity: Activity, state: Bundle?) {
+                        override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+                        override fun onActivityStarted(activity: Activity) = Unit
+                        override fun onActivityResumed(activity: Activity) {
                             if (!dexKitStarted.compareAndSet(false, true)) return
                             val apkPath = activity.applicationInfo.sourceDir
                             DexKitCoordinator.start(apkPath)
-                            activity.window.decorView.post { DexKitHostProgressDialog.show(activity) }
+                            activity.window.decorView.postDelayed({
+                                DexKitHostProgressDialog.show(activity)
+                            }, 180L)
                         }
-                        override fun onActivityStarted(activity: Activity) = Unit
-                        override fun onActivityResumed(activity: Activity) = Unit
                         override fun onActivityPaused(activity: Activity) = Unit
                         override fun onActivityStopped(activity: Activity) = Unit
                         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit

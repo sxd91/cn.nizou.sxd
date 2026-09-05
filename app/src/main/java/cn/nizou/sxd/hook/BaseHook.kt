@@ -105,6 +105,8 @@ abstract class BaseHook(
                 RetrofitHook(self, classLoader),
                 NicknameHook(self, classLoader),
                 SimianHook(self, classLoader),
+                SimianV2QuickAnswerHook(self, classLoader),
+                SimianV2WebAutomationHook(self, classLoader),
             ).forEach { it.startHookCatching() }
         }
     }

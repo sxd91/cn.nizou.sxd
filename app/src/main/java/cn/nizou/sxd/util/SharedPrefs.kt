@@ -39,6 +39,12 @@ object SettingsPrefs {
     fun readString(key: String, def: String): String =
         modulePrefs.getString(key, def) ?: def
 
+    fun readBoolean(key: String, def: Boolean): Boolean = modulePrefs.getBoolean(key, def)
+
+    fun writeBoolean(key: String, value: Boolean) {
+        modulePrefs.edit().putBoolean(key, value).apply()
+    }
+
     fun writeString(key: String, value: String) {
         modulePrefs.edit().putString(key, value).apply()
     }
@@ -140,6 +146,22 @@ object PK {
         get() = kotlin.runCatching {
             Integer.parseInt(modulePrefs.getString("pk_cyclic_mode", "1")!!)
         }.getOrElse { 1 }
+}
+
+/** SimianV2 automation keeps quick answer and each result-page action independently configurable. */
+object SimianV2AutomationPrefs {
+    const val QUICK_ANSWER = "simianv2_quick_answer"
+    const val AUTO_ANSWER = "simianv2_auto_answer"
+    const val AUTO_ANSWER_DELAY = "simianv2_auto_answer_delay"
+    const val HAPPY_ACCEPT = "simianv2_happy_accept"
+    const val CONTINUE = "simianv2_continue"
+    const val CONTINUE_PK = "simianv2_continue_pk"
+    val quickAnswer get() = modulePrefs.getBoolean(QUICK_ANSWER, false)
+    val autoAnswer get() = modulePrefs.getBoolean(AUTO_ANSWER, false)
+    val autoAnswerDelay get() = modulePrefs.getString(AUTO_ANSWER_DELAY, "8500")?.toLongOrNull()?.coerceAtLeast(0L) ?: 8500L
+    val autoHappyAccept get() = modulePrefs.getBoolean(HAPPY_ACCEPT, false)
+    val autoContinue get() = modulePrefs.getBoolean(CONTINUE, false)
+    val autoContinuePk get() = modulePrefs.getBoolean(CONTINUE_PK, false)
 }
 
 object Debug {

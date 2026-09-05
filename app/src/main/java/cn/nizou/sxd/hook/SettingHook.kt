@@ -171,6 +171,8 @@ class SettingHook(
             runCatching {
                 val intent = android.content.Intent(context, HostSettingsActivity::class.java)
                 context.startActivity(intent)
+                // ActivityProxy enters through the host shell; force the visible module entry transition.
+                context.overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
                 return
             }.onFailure { logI("showSettings via ActivityProxy failed: ${it.message}") }
             // 回退：ComponentDialog（ActivityProxy 未初始化或宿主不支持时保底）
