@@ -48,7 +48,7 @@ fun NukeSettingsScreen(onBack: () -> Unit) {
         }
     }
 }
-private fun AppThemeMode.next() = entries[(ordinal + 1) % entries.size]
-private fun PageTransitionAnimation.next() = entries[(ordinal + 1) % entries.size]
-private fun AppPaletteStyle.next() = entries[(ordinal + 1) % entries.size]
-private fun AppColorSpec.next() = entries[(ordinal + 1) % entries.size]
+private fun AppThemeMode.next() = AppThemeMode.entries[(ordinal + 1) % AppThemeMode.entries.size]
+private fun PageTransitionAnimation.next() = PageTransitionAnimation.entries[(ordinal + 1) % PageTransitionAnimation.entries.size]
+private fun AppPaletteStyle.next() = AppPaletteStyle.entries[(ordinal + 1) % AppPaletteStyle.entries.size]
+private fun AppColorSpec.next() = AppColorSpec.entries[(ordinal + 1) % AppColorSpec.entries.size]

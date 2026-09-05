@@ -48,7 +48,8 @@ object LogOverlayWindow {
                 reference.get()?.let { output ->
                     if (output.text.toString() != snapshot) {
                         output.text = snapshot
-                        (output.parent as? ScrollView)?.post { it.fullScroll(View.FOCUS_DOWN) }
+                        val scroll = output.parent as? ScrollView
+                        scroll?.post { scroll.fullScroll(View.FOCUS_DOWN) }
                     }
                 }
             }
