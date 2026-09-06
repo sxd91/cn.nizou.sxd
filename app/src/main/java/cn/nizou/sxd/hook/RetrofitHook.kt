@@ -9,6 +9,7 @@ import cn.nizou.sxd.util.PacketTool
 import cn.nizou.sxd.util.PkBundlePatcher
 import cn.nizou.sxd.util.ProvinceRegionPrefs
 import cn.nizou.sxd.util.Practice
+import cn.nizou.sxd.util.SimianV2AutomationPrefs
 import cn.nizou.sxd.util.SettingsPrefs
 import cn.nizou.sxd.util.UserInfoStore
 import cn.nizou.sxd.util.XposedHelpers
@@ -146,7 +147,7 @@ class RetrofitHook(
         //      仅极速(QUICK)模式 + PK 相关 .js bundle 响应；对 body 文本做判题恒真/跳题0ms/
         //      OCR回调恒真等替换（进页即改源码，绕开 Vue3 closure 拿不到组件实例的问题）。
         runCatching {
-            if (response != null && PK.mode == AutoAnswerMode.QUICK && shouldPatchPkBundle(fullPath)) {
+            if (response != null && (PK.mode == AutoAnswerMode.QUICK || SimianV2AutomationPrefs.quickSubmit) && shouldPatchPkBundle(fullPath)) {
                 val body = XposedHelpers.callMethod(response, "body")
                 val text = XposedHelpers.callMethod(body, "string") as? String
                 if (text != null) {

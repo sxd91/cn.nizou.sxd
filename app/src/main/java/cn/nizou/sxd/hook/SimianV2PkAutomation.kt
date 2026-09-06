@@ -66,7 +66,7 @@ internal object SimianV2PkAutomation {
         if (!webView.isAttachedToWindow) return
         submitStrokeOnce(webView, index, total) { ok ->
             if (ok) return@submitStrokeOnce
-            val max = if (quick) 500 else SimianV2AutomationPrefs.retryMax.coerceAtLeast(1)
+            val max = if (quick) 2000 else SimianV2AutomationPrefs.retryMax.coerceAtLeast(1)
             if (attempt < max) {
                 val rd = (if (quick) 150L else SimianV2AutomationPrefs.retryDelay.coerceAtLeast(0L))
                 logI("SimianV2 笔画提交 $index/$total 失败，重试 ${attempt + 1}/$max (间隔 ${rd}ms)")

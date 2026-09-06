@@ -79,6 +79,15 @@ object PkBundlePatcher {
         cnt += p7.findAll(s).count() * 10
         s = p7.replace(s, "if(!0)")
 
+        // 8) 去开场动画（READY/GO）：把 readyGoEnd 触发后的长等待链拆成几乎立即执行
+        //    参考 XiaoYuanKouSuan response_handler.py。重写后即使前端未播 READY/GO 也能快速进入可提交状态。
+        val p8 = Regex("\\\"readyGoEnd\\\"\\)\\},.{1,8}\\)\\},.{1,8}\\)\\},.{1,8}\\)\\}")
+        val n8 = p8.findAll(s).count()
+        if (n8 > 0) {
+            cnt += n8 * 10
+            s = p8.replace(s, "\"readyGoEnd\")}),20)}),20)}),20)})")
+        }
+
         return s to cnt
     }
 }
