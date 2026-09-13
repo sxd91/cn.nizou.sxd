@@ -11,8 +11,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Direct SimianV2 WebApi scheduling model with the actual 3.140 dynamic pad module. */
+/** Direct SimianV2 WebApi scheduling model. The pad instance comes from the live Vue/Pinia store. */
 internal object SimianV2PkAutomation {
-    private const val PAD_MODULE_URL = "https://leo.fbcontent.cn/bh5/leo-web-oral-pk/assets/index-legacy.DMgv2yXx.js"
     private enum class Task { STROKE, HAPPY, CONTINUE, CONTINUE_PK }
     private val handler = Handler(Looper.getMainLooper())
     private val tasks = mutableMapOf<Task, Runnable>()
