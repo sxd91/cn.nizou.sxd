@@ -12,8 +12,7 @@ import org.json.JSONObject
 
 /** Direct SimianV2 WebApi scheduling model with the actual 3.140 dynamic pad module. */
 internal object SimianV2PkAutomation {
-    /** 画板 bundle 兜底提示：真实文件名带构建哈希（如 index-legacy.CKMWxMM3.js），由页面运行时自定位。 */
-    private const val PAD_MODULE_HINT_URL = "https://leo.fbcontent.cn/bh5/leo-web-oral-pk/assets/index-legacy.DMgv2yXx.js"
+    private const val PAD_MODULE_URL = "https://leo.fbcontent.cn/bh5/leo-web-oral-pk/assets/index-legacy.DMgv2yXx.js"
     private enum class Task { STROKE, HAPPY, CONTINUE, CONTINUE_PK }
     private val handler = Handler(Looper.getMainLooper())
     private val tasks = mutableMapOf<Task, Runnable>()
@@ -92,58 +91,37 @@ internal object SimianV2PkAutomation {
                 })
             }
         }
-        val hintJson = JSONObject.quote(PAD_MODULE_HINT_URL)
         val script = """
 (() => {
     const points = $pointsJson;
-    const hint = $hintJson;
     const status = window.__strokeSubmitStatus = { status: 'finding-module', pointCount: points.length };
     const unref = target => { if (target && typeof target === 'object' && 'value' in target) { return target.value; } return target; };
     const findWritingModule = async () => {
-        const raw = [];
-        try { performance.getEntriesByType('resource').forEach(item => raw.push(item.name)); } catch (_) { }
-        Array.from(document.scripts).forEach(item => { if (item.src) raw.push(item.src); });
-        Array.from(document.querySelectorAll('link[href]')).forEach(item => {
-            const rel = (item.getAttribute('rel') || '').toLowerCase();
-            if (rel.indexOf('modulepreload') >= 0 || rel.indexOf('preload') >= 0 || rel.indexOf('prefetch') >= 0) raw.push(item.href);
-        });
-        const pages = [location.href];
-        try { pages.push(new URL('./', location.href).href); } catch (_) { }
-        for (const page of pages) {
-            try {
-                const response = await fetch(page, { credentials: 'include' });
-                if (!response.ok) continue;
-                const text = await response.text();
-                (text.match(/[^"'\s()<>]*index-legacy\.[A-Za-z0-9_\-]+\.js/g) || []).forEach(item => raw.push(item));
-            } catch (_) { }
-        }
-        if (hint) raw.push(hint);
-        const normalize = url => { try { return new URL(url, location.href).href; } catch (_) { return null; } };
-        const isPadBundle = url => {
-            try {
-                const path = new URL(url, location.href).pathname;
-                return path.indexOf('/assets/index-legacy.') >= 0 && path.slice(-3) === '.js';
-            } catch (_) { return false; }
-        };
-        const candidates = Array.from(new Set(raw.map(normalize).filter(Boolean).filter(isPadBundle)));
+        const resourceUrls = performance.getEntriesByType('resource').map(item => item.name);
+        const scriptUrls = Array.from(document.scripts).map(item => item.src).filter(Boolean);
+        const candidates = Array.from(new Set([...resourceUrls, ...scriptUrls]))
+            .filter(url => url.includes('/leo-web-oral-pk/assets/') && /index-legacy\.[^/]+\.js/.test(url));
         status.candidates = candidates;
         for (const moduleUrl of candidates) {
             try {
-                const module = (typeof System !== 'undefined' && typeof System.import === 'function') ? await System.import(moduleUrl) : await import(moduleUrl);
+                const module = await System.import(moduleUrl);
                 if (typeof module?.d !== 'function') continue;
+                const exportSource = Function.prototype.toString.call(module.d);
+                if (!exportSource.includes('recognizeConfig') || !exportSource.includes('pad')) continue;
                 const store = module.d();
                 const pad = unref(store?.pad);
+                const recognizeConfig = unref(store?.recognizeConfig);
                 if (!pad || typeof pad.dispatchEvent !== 'function' || typeof pad.toData !== 'function') continue;
-                return { moduleUrl: moduleUrl, store: store, pad: pad, recognizeConfig: unref(store?.recognizeConfig) };
+                if (!recognizeConfig) continue;
+                return { moduleUrl, store, pad, recognizeConfig };
             } catch (_) { }
         }
         throw new Error('没有找到已初始化的画板模块');
     };
+    if (typeof System === 'undefined' || typeof System.import !== 'function') { status.status = 'failed'; status.error = '当前页面不支持System.import'; return JSON.stringify(status); }
     findWritingModule().then(result => {
         const pad = result.pad; const config = result.recognizeConfig;
-        status.moduleUrl = result.moduleUrl;
-        status.keypointId = config ? config.keypointId : null;
-        status.expectedResult = config ? config.answers : null;
+        status.moduleUrl = result.moduleUrl; status.keypointId = config.keypointId; status.expectedResult = config.answers;
         pad._data = [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
         if ('_isEmpty' in pad) { pad._isEmpty = false; }
         status.status = 'dispatching-end-stroke';
