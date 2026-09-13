@@ -94,40 +94,72 @@ internal object SimianV2PkAutomation {
         val script = """
 (() => {
     const points = $pointsJson;
-    const status = window.__strokeSubmitStatus = { status: 'finding-module', pointCount: points.length };
-    const unref = target => { if (target && typeof target === 'object' && 'value' in target) { return target.value; } return target; };
-    const findWritingModule = async () => {
-        const resourceUrls = performance.getEntriesByType('resource').map(item => item.name);
-        const scriptUrls = Array.from(document.scripts).map(item => item.src).filter(Boolean);
-        const candidates = Array.from(new Set([...resourceUrls, ...scriptUrls]))
-            .filter(url => url.includes('/leo-web-oral-pk/assets/') && /index-legacy\.[^/]+\.js/.test(url));
-        status.candidates = candidates;
-        for (const moduleUrl of candidates) {
+    const status = window.__strokeSubmitStatus = { status: 'finding-pad', pointCount: points.length };
+    const unref = t => (t && typeof t === 'object' && 'value' in t) ? t.value : t;
+    const isPad = p => !!p && typeof p.dispatchEvent === 'function' && typeof p.toData === 'function';
+    const isLive = cfg => !!cfg && !!cfg.keypointId;
+    const piniaKey = String.fromCharCode(36) + 'pinia';
+    const collect = () => {
+        const pins = [];
+        const el = document.querySelector('#app') || document.body;
+        const app = el && el.__vue_app__;
+        if (app && app.config && app.config.globalProperties && app.config.globalProperties[piniaKey]) pins.push(app.config.globalProperties[piniaKey]);
+        status.piniaFound = pins.length;
+        for (const pinia of pins) {
+            const map = pinia && pinia._s;
+            if (!map || typeof map.forEach !== 'function') continue;
+            let hit = null;
+            map.forEach(store => {
+                if (hit) return;
+                const pad = unref(store && store.pad);
+                const cfg = unref(store && store.recognizeConfig);
+                if (isPad(pad) && isLive(cfg)) hit = { pad: pad, config: cfg };
+            });
+            status.storeCount = map.size;
+            if (hit) return { source: 'live-pinia', pad: hit.pad, config: hit.config };
+        }
+        return null;
+    };
+    const fromRegistry = async () => {
+        if (typeof System === 'undefined' || typeof System.import !== 'function' || typeof System.entries !== 'function') return null;
+        const urls = [];
+        System.entries().forEach((v, k) => {
+            if (typeof k === 'string' && k.indexOf('index-legacy.') >= 0 && k.slice(-3) === '.js') urls.push(k);
+        });
+        status.registry = urls;
+        for (const url of urls) {
             try {
-                const module = await System.import(moduleUrl);
-                if (typeof module?.d !== 'function') continue;
-                const exportSource = Function.prototype.toString.call(module.d);
-                if (!exportSource.includes('recognizeConfig') || !exportSource.includes('pad')) continue;
-                const store = module.d();
-                const pad = unref(store?.pad);
-                const recognizeConfig = unref(store?.recognizeConfig);
-                if (!pad || typeof pad.dispatchEvent !== 'function' || typeof pad.toData !== 'function') continue;
-                if (!recognizeConfig) continue;
-                return { moduleUrl, store, pad, recognizeConfig };
+                const m = await System.import(url);
+                if (typeof m.d !== 'function') continue;
+                const store = m.d();
+                const pad = unref(store && store.pad);
+                const cfg = unref(store && store.recognizeConfig);
+                if (!isPad(pad) || !isLive(cfg)) continue;
+                return { source: 'systemjs-registry', pad: pad, config: cfg };
             } catch (_) { }
         }
-        throw new Error('没有找到已初始化的画板模块');
+        return null;
     };
-    if (typeof System === 'undefined' || typeof System.import !== 'function') { status.status = 'failed'; status.error = '当前页面不支持System.import'; return JSON.stringify(status); }
-    findWritingModule().then(result => {
-        const pad = result.pad; const config = result.recognizeConfig;
-        status.moduleUrl = result.moduleUrl; status.keypointId = config.keypointId; status.expectedResult = config.answers;
-        pad._data = [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
-        if ('_isEmpty' in pad) { pad._isEmpty = false; }
+    const commit = found => {
+        status.source = found.source;
+        status.keypointId = found.config.keypointId;
+        status.expectedResult = found.config.answers;
+        found.pad._data = [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
+        if ('_isEmpty' in found.pad) { found.pad._isEmpty = false; }
         status.status = 'dispatching-end-stroke';
-        pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
+        found.pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
         status.status = 'waiting-recognition';
-    }).catch(error => { status.status = 'failed'; status.error = String(error?.stack || error?.message || error); });
+    };
+    const live = collect();
+    if (live) { commit(live); return JSON.stringify(status); }
+    fromRegistry().then(found => {
+        if (found) { commit(found); return; }
+        status.status = 'failed';
+        status.error = 'no live pad found in pinia store or SystemJS registry';
+    }).catch(err => {
+        status.status = 'failed';
+        status.error = String(err && err.message ? err.message : err);
+    });
     return JSON.stringify(status);
 })();
 """.trimIndent()
