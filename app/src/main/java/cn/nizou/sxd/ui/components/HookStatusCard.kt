@@ -24,7 +24,7 @@ import cn.nizou.sxd.util.readInjectedModuleSelf
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Check_circle
 import com.composables.icons.materialsymbols.outlined.Error
-import com.composables.icons.materialsymbols.outlined.Remove_circle
+import com.composables.icons.materialsymbols.outlined.Cancel
 
 /**
  * WeKit injected SettingsActivity home-card counterpart.
@@ -49,7 +49,7 @@ fun HookStatusCard(modifier: Modifier = Modifier) {
         else -> "模块已激活"
     }
     val leadingIcon = when {
-        environment == null -> MaterialSymbols.Outlined.Remove_circle
+        environment == null -> MaterialSymbols.Outlined.Cancel
         !environment.apiCompatible -> MaterialSymbols.Outlined.Error
         else -> MaterialSymbols.Outlined.Check_circle
     }
