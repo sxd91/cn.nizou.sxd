@@ -102,44 +102,65 @@ internal object SimianV2PkAutomation {
     // 真机 probe 已证实：globalProperties 无 dollar-pinia、System.entries() 为空、PK 页面不走离线包。
     // 唯一能拿到活体 pad 的方式：遍历 Vue 组件树，找 setupState 上带 pad/recognizeConfig 的组件。
     const looksLikePad = v => isPad(unref(v));
-    const scanInstance = inst => {
-        if (!inst || hitSeen) return;
-        const st = inst.setupState || {};
-        const pad = st.pad, cfg = st.recognizeConfig;
-        if (looksLikePad(pad) && isLive(unref(cfg))) {
-            hitSeen = { source: 'vue-setup-pad', pad: unref(pad), config: unref(cfg) };
-            return;
-        }
-        // 也扫描 ctx / proxy 上的 pad（部分组件不是 setup 写法）
-        const ctx = inst.ctx || {};
-        if (looksLikePad(ctx.pad) && isLive(unref(ctx.recognizeConfig))) {
-            hitSeen = { source: 'vue-ctx-pad', pad: unref(ctx.pad), config: unref(ctx.recognizeConfig) };
-            return;
-        }
-        // 深度优先遍历子树
-        const kids = [];
-        const sub = inst.subTree;
-        const walk = vnode => {
-            if (!vnode) return;
-            if (vnode.component) kids.push(vnode.component);
-            if (Array.isArray(vnode.children)) vnode.children.forEach(walk);
-            if (vnode.suspense && vnode.suspense.activeBranch) walk(vnode.suspense.activeBranch);
-        };
-        walk(sub);
-        for (const k of kids) { scanInstance(k); if (hitSeen) return; }
-    };
+    // ---- 诊断：遍历组件树并记录每层观察，写进 status.walk ----
+    const walkLog = [];
     let hitSeen = null;
+    const subTreeChildren = vnode => {
+        const kids = [];
+        const walk = v => {
+            if (!v) return;
+            if (v.component) kids.push(v.component);
+            if (Array.isArray(v.children)) v.children.forEach(walk);
+            if (v.suspense && v.suspense.activeBranch) walk(v.suspense.activeBranch);
+        };
+        walk(vnode);
+        return kids;
+    };
+    const scanInstance = (inst, depth) => {
+        if (!inst || hitSeen) return;
+        if (depth > 60) return;
+        const st = inst.setupState || {};
+        const stKeys = Object.keys(st);
+        const hasPad = !!st.pad;
+        const hasCfg = !!st.recognizeConfig;
+        const padObj = unref(st.pad);
+        const cfgObj = unref(st.recognizeConfig);
+        const rec = {
+            d: depth,
+            name: (inst.type && (inst.type.name || inst.type.__name)) || '',
+            stKeys: stKeys.slice(0, 20),
+            hasPad: hasPad,
+            padShape: hasPad ? (typeof padObj + (padObj && typeof padObj === 'object' ? ':' + Object.getOwnPropertyNames(padObj).slice(0, 10).join(',') : '')) : '',
+            hasCfg: hasCfg,
+            cfgKeypoint: cfgObj && cfgObj.keypointId
+        };
+        walkLog.push(rec);
+        if (hasPad && isPad(padObj) && isLive(cfgObj)) {
+            hitSeen = { source: 'vue-setup-pad', pad: padObj, config: cfgObj };
+            return;
+        }
+        const ctx = inst.ctx || {};
+        const ctxPad = unref(ctx.pad);
+        if (ctxPad && isPad(ctxPad) && isLive(unref(ctx.recognizeConfig))) {
+            hitSeen = { source: 'vue-ctx-pad', pad: ctxPad, config: unref(ctx.recognizeConfig) };
+            return;
+        }
+        const kids = subTreeChildren(inst.subTree);
+        for (const k of kids) { scanInstance(k, depth + 1); if (hitSeen) return; }
+    };
     const collect = () => {
         const el = document.querySelector('#app') || document.body;
         const app = el && el.__vue_app__;
         if (!app) return null;
-        // 1. 从 #app 所在组件的实例树开始遍历
         const root = app._instance;
-        scanInstance(root);
+        scanInstance(root, 0);
+        status.walk = walkLog.slice(0, 40);
+        status.walkCount = walkLog.length;
         if (hitSeen) { status.piniaFound = 1; return hitSeen; }
-        // 2. 兜底：遍历 app._context.provides 里所有注入值，找带 pad 的对象
         const provides = (app._context && app._context.provides) || {};
-        for (const k in provides) {
+        const pKeys = Object.keys(provides);
+        status.providesKeys = pKeys.slice(0, 20);
+        for (const k of pKeys) {
             let v = null;
             try { v = provides[k]; } catch (_) { continue; }
             const pad = unref(v && v.pad);
