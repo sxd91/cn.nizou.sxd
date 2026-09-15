@@ -98,26 +98,55 @@ internal object SimianV2PkAutomation {
     const unref = t => (t && typeof t === 'object' && 'value' in t) ? t.value : t;
     const isPad = p => !!p && typeof p.dispatchEvent === 'function' && typeof p.toData === 'function';
     const isLive = cfg => !!cfg && !!cfg.keypointId;
-    const piniaKey = String.fromCharCode(36) + 'pinia';
+    // 画板实例不是放在 Pinia store 里，而是 useRecognizeBoard 这个 composable 内部的局部 ref。
+    // 真机 probe 已证实：globalProperties 无 $pinia、System.entries() 为空、PK 页面不走离线包。
+    // 唯一能拿到活体 pad 的方式：遍历 Vue 组件树，找 setupState 上带 pad/recognizeConfig 的组件。
+    const looksLikePad = v => isPad(unref(v));
+    const scanInstance = inst => {
+        if (!inst || hitSeen) return;
+        const st = inst.setupState || {};
+        const pad = st.pad, cfg = st.recognizeConfig;
+        if (looksLikePad(pad) && isLive(unref(cfg))) {
+            hitSeen = { source: 'vue-setup-pad', pad: unref(pad), config: unref(cfg) };
+            return;
+        }
+        // 也扫描 ctx / proxy 上的 pad（部分组件不是 setup 写法）
+        const ctx = inst.ctx || {};
+        if (looksLikePad(ctx.pad) && isLive(unref(ctx.recognizeConfig))) {
+            hitSeen = { source: 'vue-ctx-pad', pad: unref(ctx.pad), config: unref(ctx.recognizeConfig) };
+            return;
+        }
+        // 深度优先遍历子树
+        const kids = [];
+        const sub = inst.subTree;
+        const walk = vnode => {
+            if (!vnode) return;
+            if (vnode.component) kids.push(vnode.component);
+            if (Array.isArray(vnode.children)) vnode.children.forEach(walk);
+            if (vnode.suspense && vnode.suspense.activeBranch) walk(vnode.suspense.activeBranch);
+        };
+        walk(sub);
+        for (const k of kids) { scanInstance(k); if (hitSeen) return; }
+    };
+    let hitSeen = null;
     const collect = () => {
-        const pins = [];
         const el = document.querySelector('#app') || document.body;
         const app = el && el.__vue_app__;
-        if (app && app.config && app.config.globalProperties && app.config.globalProperties[piniaKey]) pins.push(app.config.globalProperties[piniaKey]);
-        status.piniaFound = pins.length;
-        for (const pinia of pins) {
-            const map = pinia && pinia._s;
-            if (!map || typeof map.forEach !== 'function') continue;
-            let hit = null;
-            map.forEach(store => {
-                if (hit) return;
-                const pad = unref(store && store.pad);
-                const cfg = unref(store && store.recognizeConfig);
-                if (isPad(pad) && isLive(cfg)) hit = { pad: pad, config: cfg };
-            });
-            status.storeCount = map.size;
-            if (hit) return { source: 'live-pinia', pad: hit.pad, config: hit.config };
+        if (!app) return null;
+        // 1. 从 #app 所在组件的实例树开始遍历
+        const root = app._instance;
+        scanInstance(root);
+        if (hitSeen) { status.piniaFound = 1; return hitSeen; }
+        // 2. 兜底：遍历 app._context.provides 里所有注入值，找带 pad 的对象
+        const provides = (app._context && app._context.provides) || {};
+        for (const k in provides) {
+            let v = null;
+            try { v = provides[k]; } catch (_) { continue; }
+            const pad = unref(v && v.pad);
+            const cfg = unref(v && v.recognizeConfig);
+            if (isPad(pad) && isLive(cfg)) { status.piniaFound = 1; return { source: 'vue-provides', pad: pad, config: cfg }; }
         }
+        status.piniaFound = 0;
         return null;
     };
     const fromRegistry = async () => {
