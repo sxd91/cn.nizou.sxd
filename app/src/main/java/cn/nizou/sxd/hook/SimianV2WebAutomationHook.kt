@@ -37,7 +37,9 @@ class SimianV2WebAutomationHook(self: XposedInterface, classLoader: ClassLoader)
                 if (SimianV2AutomationPrefs.autoContinuePk) SimianV2PkAutomation.clickContinuePk(webView)
             }
             else -> {
-                // navigating away or any non-PK url invalidates abandoned stroke set
+                // 离开 PK 链路（非 exercise/result/honor-roll URL）时主动取消未执行的笔画任务，
+                // 避免旧 session 的延迟任务挂在 handler 上、与新页面 session 抢占同一个画板。
+                SimianV2PkAutomation.cancelStrokeSession(webView, "navigated away: " + clean)
             }
         }
     }

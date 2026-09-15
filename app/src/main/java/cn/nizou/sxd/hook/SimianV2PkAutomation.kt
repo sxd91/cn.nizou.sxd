@@ -140,14 +140,48 @@ internal object SimianV2PkAutomation {
         }
         return null;
     };
+    const groupsFromPoints = () => [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, dotSize: 0, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
     const commit = found => {
         status.source = found.source;
         status.keypointId = found.config.keypointId;
         status.expectedResult = found.config.answers;
-        found.pad._data = [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
-        if ('_isEmpty' in found.pad) { found.pad._isEmpty = false; }
+        const pad = found.pad;
+        status.status = 'injecting-data';
+        // 优先走画板自身的数据注入 API：fromData 会把点集正规化为贝塞尔段并真正画到 canvas，
+        // 这样后续 endStroke 监听器通过 toData() 读到的是完整笔画，识别端不再拿到空内容。
+        let injected = false;
+        try {
+            if (typeof pad.fromData === 'function') {
+                pad.fromData(groupsFromPoints(), { clear: true });
+                injected = true;
+                status.injectMode = 'fromData';
+            }
+        } catch (err) {
+            status.injectError = String(err && err.message ? err.message : err);
+        }
+        // 回退：直接写 _data 并同步 _isEmpty / 重绘，兼容没有 fromData 的旧画板实现。
+        if (!injected) {
+            pad._data = groupsFromPoints();
+            if ('_isEmpty' in pad) { pad._isEmpty = false; }
+            try {
+                if (typeof pad._fromData === 'function') {
+                    pad._fromData(pad._data, pad._drawCurve.bind(pad), pad._drawDot.bind(pad));
+                }
+            } catch (_) { }
+            if ('_isEmpty' in pad) { pad._isEmpty = false; }
+            status.injectMode = 'raw-data';
+        }
         status.status = 'dispatching-end-stroke';
-        found.pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
+        try {
+            pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
+            status.dispatchOk = true;
+        } catch (err2) {
+            status.dispatchOk = false;
+            status.dispatchError = String(err2 && err2.message ? err2.message : err2);
+            status.status = 'failed';
+            status.error = 'endStroke dispatch threw: ' + status.dispatchError;
+            return;
+        }
         status.status = 'waiting-recognition';
     };
     const live = collect();
