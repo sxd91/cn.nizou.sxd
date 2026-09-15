@@ -196,10 +196,10 @@ internal object SimianV2PkAutomation {
         if (app && app.config && app.config.globalProperties) {
             const g = app.config.globalProperties;
             info.globalPropKeys = Object.keys(g).slice(0, 40);
-            info.hasDollarPinia = !!g['$pinia'];
-            info.hasPinia = !!g['pinia'];
+            info.hasDollarPinia = !!g[piniaKey];
+            info.hasPinia = !!g['pinia'.slice(0)];
         }
-        const p = app && app.config && app.config.globalProperties ? app.config.globalProperties['$pinia'] : null;
+        const p = app && app.config && app.config.globalProperties ? app.config.globalProperties[piniaKey] : null;
         if (p && p._s) {
             info.storeCount = p._s.size;
             info.storeNames = [];
