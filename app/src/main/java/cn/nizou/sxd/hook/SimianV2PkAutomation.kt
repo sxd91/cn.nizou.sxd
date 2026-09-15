@@ -184,15 +184,47 @@ internal object SimianV2PkAutomation {
         }
         status.status = 'waiting-recognition';
     };
+    const probe = () => {
+        const info = {};
+        let appEl = null, app = null;
+        for (const el of document.querySelectorAll('*')) {
+            if (el.__vue_app__) { appEl = el; app = el.__vue_app__; break; }
+        }
+        info.appTag = appEl ? appEl.tagName + (appEl.id ? '#' + appEl.id : '') : null;
+        info.appElExists = !!document.querySelector('#app');
+        info.appElChildCount = document.querySelector('#app') ? document.querySelector('#app').children.length : -1;
+        if (app && app.config && app.config.globalProperties) {
+            const g = app.config.globalProperties;
+            info.globalPropKeys = Object.keys(g).slice(0, 40);
+            info.hasDollarPinia = !!g['$pinia'];
+            info.hasPinia = !!g['pinia'];
+        }
+        const p = app && app.config && app.config.globalProperties ? app.config.globalProperties['$pinia'] : null;
+        if (p && p._s) {
+            info.storeCount = p._s.size;
+            info.storeNames = [];
+            p._s.forEach((st, nm) => {
+                const ks = st ? Object.keys(st).slice(0, 30) : [];
+                info.storeNames.push({ name: nm, hasPad: ks.includes('pad'), hasRecognizeConfig: ks.includes('recognizeConfig'), keys: ks });
+            });
+        }
+        info.registryKeys = [];
+        if (typeof System !== 'undefined' && typeof System.entries === 'function') {
+            System.entries().forEach((v, k) => info.registryKeys.push(k));
+        }
+        return info;
+    };
     const live = collect();
     if (live) { commit(live); return JSON.stringify(status); }
     fromRegistry().then(found => {
         if (found) { commit(found); return; }
         status.status = 'failed';
         status.error = 'no live pad found in pinia store or SystemJS registry';
+        try { status.probe = probe(); } catch (e) { status.probeError = String(e && e.message ? e.message : e); }
     }).catch(err => {
         status.status = 'failed';
         status.error = String(err && err.message ? err.message : err);
+        try { status.probe = probe(); } catch (e) { status.probeError = String(e && e.message ? e.message : e); }
     });
     return JSON.stringify(status);
 })();
