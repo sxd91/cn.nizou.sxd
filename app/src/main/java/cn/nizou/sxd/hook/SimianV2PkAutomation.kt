@@ -99,7 +99,7 @@ internal object SimianV2PkAutomation {
     const isPad = p => !!p && typeof p.dispatchEvent === 'function' && typeof p.toData === 'function';
     const isLive = cfg => !!cfg && !!cfg.keypointId;
     // 画板实例不是放在 Pinia store 里，而是 useRecognizeBoard 这个 composable 内部的局部 ref。
-    // 真机 probe 已证实：globalProperties 无 $pinia、System.entries() 为空、PK 页面不走离线包。
+    // 真机 probe 已证实：globalProperties 无 dollar-pinia、System.entries() 为空、PK 页面不走离线包。
     // 唯一能拿到活体 pad 的方式：遍历 Vue 组件树，找 setupState 上带 pad/recognizeConfig 的组件。
     const looksLikePad = v => isPad(unref(v));
     const scanInstance = inst => {
