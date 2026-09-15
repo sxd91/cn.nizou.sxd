@@ -67,20 +67,20 @@ abstract class BaseHook(
     }
 
     /**
-     * 用现代 hook 链注册拦截器。旧 before/after 落 Chain 的语义见记忆 03 §3.2：
-     * - 改参：复制 chain.args 后 `chain.proceed(newArgs)`
-     * - 短路/改结果：直接返回目标值（不 proceed 即短路）
-     * - 观测：`return chain.proceed()`
-     *
-     * 调用方式：`method.intercept("id") { chain -> ... }`（尾随 lambda 经 SAM 转成 Hooker）。
+     * 用现代 hook 链注册拦截器。setId()/setExceptionMode() 是 libxposed API 102 才引入的方法，
+     * 模块 minApiVersion=30，低版本框架必须走不带这两个方法的旧链，否则 lint 的 XposedNewApi
+     * 检查会报错、且运行时会 NoSuchMethodError。
      */
     protected fun Executable.intercept(
         id: String = name,
         hooker: XposedInterface.Hooker
-    ): HookHandle = when (this) {
-        is Method -> self.hook(this).setId(id).setExceptionMode(ExceptionMode.DEFAULT).intercept(hooker)
-        is Constructor<*> -> self.hook(this).setId(id).setExceptionMode(ExceptionMode.DEFAULT).intercept(hooker)
-        else -> throw IllegalArgumentException("unexpected executable: $this")
+    ): HookHandle {
+        val builder = self.hook(this)
+        if (self.getApiVersion() >= 102) {
+            builder.setId(id)
+            builder.setExceptionMode(ExceptionMode.DEFAULT)
+        }
+        return builder.intercept(hooker)
     }
 
     fun startHookCatching(): Result<Unit> {

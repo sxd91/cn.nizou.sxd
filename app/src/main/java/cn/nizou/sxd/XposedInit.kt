@@ -15,6 +15,7 @@ import cn.nizou.sxd.util.HookStatus
 import cn.nizou.sxd.util.XposedHelpers
 import cn.nizou.sxd.ui.host.DexKitHostProgressDialog
 import cn.nizou.sxd.util.crash.JavaCrashHandler
+import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
 import kotlinx.serialization.json.Json
@@ -92,6 +93,15 @@ class XposedInit : XposedModule() {
      * 改为首次使用时懒加载（见 util/Strokes.kt），避免 System.load 与框架 native 加载
      * 窗口冲突 abort 进程。
      */
+    /**
+     * 版本感知的 hook builder：setId() 是 libxposed API 102 才引入的方法，
+     * module.prop 的 minApiVersion=30，低版本框架不能调 setId，否则 lint 报 XposedNewApi、
+     * 运行时会 NoSuchMethodError。API >= 102 时带 id 注册（便于框架侧管理与热重载），
+     * 低于 102 时退化为不带 id 的 hook。
+     */
+    private fun hookExecutable(id: String, executable: java.lang.reflect.Executable): XposedInterface.HookBuilder =
+        if (apiVersion >= 102) hook(executable).setId(id) else hook(executable)
+
     override fun onPackageReady(param: XposedModuleInterface.PackageReadyParam) {
         if (param.packageName != HOST_PACKAGE_NAME) return
         if (!param.isFirstPackage) return
@@ -101,7 +111,7 @@ class XposedInit : XposedModule() {
             val appClass = XposedHelpers.findClass("android.app.Application", appClassLoader)
             val attach = appClass.getDeclaredMethod("attach", android.content.Context::class.java)
             attach.isAccessible = true
-            hook(attach).setId("app_attach").intercept { chain ->
+            hookExecutable("app_attach", attach).intercept { chain ->
                 val r = chain.proceed()
                 try {
                     BaseHook.startHook(this, appClassLoader)
@@ -109,7 +119,7 @@ class XposedInit : XposedModule() {
                     // Hook the framework Activity resume path as the same direct reattach trigger Simian relies on.
                     runCatching {
                         val resume = Activity::class.java.getDeclaredMethod("onResume")
-                        hook(resume).setId("simian_overlay_activity_resume").intercept { resumeChain ->
+                        hookExecutable("simian_overlay_activity_resume", resume).intercept { resumeChain ->
                             val result = resumeChain.proceed()
                             val activity = resumeChain.thisObject as? Activity
                             if (activity?.application?.packageName == HOST_PACKAGE_NAME) {
