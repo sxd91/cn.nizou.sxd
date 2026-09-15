@@ -148,10 +148,40 @@ internal object SimianV2PkAutomation {
         const kids = subTreeChildren(inst.subTree);
         for (const k of kids) { scanInstance(k, depth + 1); if (hitSeen) return; }
     };
+    // 找到挂在任意元素上的 Vue app 实例。宿主页面是 System.register + 远端 bundle 架构，
+    // #app 常常只是空壳容器，真正的 __vue_app__ 可能挂在内部子节点或其它元素上；
+    // 只查 #app 会漏，因此这里做三层兜底。
+    const findVueApp = () => {
+        const probe = [];
+        const appEl = document.getElementById('app');
+        if (appEl) {
+            if (appEl.__vue_app__) return { app: appEl.__vue_app__, via: 'app-el' };
+            probe.push(appEl);
+        }
+        // 兜底 1：#app 的所有后代（深度优先，最多 200 个）
+        if (appEl) {
+            const stack = [appEl];
+            let n = 0;
+            while (stack.length && n < 200) {
+                const cur = stack.pop(); n++;
+                if (cur.__vue_app__) return { app: cur.__vue_app__, via: 'app-descendant' };
+                const kids = cur.children;
+                if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
+            }
+        }
+        // 兜底 2：全文档扫（最多 2000 个元素）
+        const all = document.querySelectorAll('*');
+        const cap = Math.min(all.length, 2000);
+        for (let i = 0; i < cap; i++) {
+            if (all[i].__vue_app__) return { app: all[i].__vue_app__, via: 'document-scan' };
+        }
+        return null;
+    };
     const collect = () => {
-        const el = document.querySelector('#app') || document.body;
-        const app = el && el.__vue_app__;
-        if (!app) return null;
+        const found = findVueApp();
+        status.vueAppVia = found ? found.via : 'none';
+        if (!found) return null;
+        const app = found.app;
         const root = app._instance;
         scanInstance(root, 0);
         status.walk = walkLog.slice(0, 40);
