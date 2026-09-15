@@ -45,7 +45,7 @@ fun HookStatusCard(modifier: Modifier = Modifier) {
     // environment == null 表示宿主进程里读不到活体 XposedInit（模块独立进程/未注入）。
     val headline = when {
         environment == null -> "模块未激活"
-        !environment.apiCompatible -> "框架版本过低"
+        !environment.apiCompatible -> "框架版本不匹配"
         else -> "模块已激活"
     }
     val leadingIcon = when {
@@ -63,7 +63,7 @@ fun HookStatusCard(modifier: Modifier = Modifier) {
         !environment.apiCompatible ->
             environment.frameworkName.ifBlank { "Xposed" } +
                 " · API " + environment.apiVersion +
-                " < " + HookStatus.MIN_API
+                " 不在 " + HookStatus.MIN_API + ".." + HookStatus.MAX_API + " 内"
         else -> hookBridgeName
     }
 
@@ -162,7 +162,7 @@ fun readInjectedLoadingEnvironment(): InjectedLoadingEnvironment? {
         hookBridgeName = "libxposed $apiText",
         apiVersion = apiVersion,
         frameworkName = frameworkName,
-        apiCompatible = apiVersion < 0 || apiVersion >= HookStatus.MIN_API,
+        apiCompatible = apiVersion < 0 || apiVersion in HookStatus.MIN_API..HookStatus.MAX_API,
     )
 }
 

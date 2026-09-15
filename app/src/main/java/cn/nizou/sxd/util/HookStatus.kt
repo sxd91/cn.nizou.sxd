@@ -12,7 +12,10 @@ object HookStatus {
     private const val KEY_API_VERSION = "api_version"
 
     /** module.prop 声明的 minApiVersion；框架 API 低于此值时 hook() 可能抛 HookFailedError。 */
-    const val MIN_API = 102
+    const val MIN_API = 30
+
+    /** module.prop 声明的 targetApiVersion；框架 API 高于此值时模块行为未经适配。 */
+    const val MAX_API = 102
 
     /** 未写入时的哨兵值：保守放行，避免老版本模块或首次注入被误判未激活。 */
     const val API_UNKNOWN = -1
@@ -57,15 +60,15 @@ object HookStatus {
     }
 
     /**
-     * 注入菜单激活判定：hook_active 标记为真，且框架 API 版本不低于 module.prop 的
-     * minApiVersion。API_UNKNOWN 表示框架未上报版本（老模块 / npatch 精简实现），
-     * 保守放行——否则会把能用的框架误判成未激活。
+     * 注入菜单激活判定：hook_active 标记为真，且框架 API 版本落在 module.prop 声明的
+     * minApiVersion..targetApiVersion 区间内。API_UNKNOWN 表示框架未上报版本
+     * （老模块 / npatch 精简实现），保守放行——否则会把能用的框架误判成未激活。
      */
     fun isActivated(prefsRemote: SharedPreferences?): Boolean {
         val active = prefsRemote?.getBoolean(KEY_HOOK_ACTIVE, false) ?: localActive
         if (!active) return false
         val api = readApiVersion(prefsRemote)
-        return api == API_UNKNOWN || api >= MIN_API
+        return api == API_UNKNOWN || api in MIN_API..MAX_API
     }
 
     @Volatile

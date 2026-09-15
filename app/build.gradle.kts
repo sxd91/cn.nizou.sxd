@@ -38,7 +38,7 @@ android {
 
     defaultConfig {
         applicationId = "cn.nizou.sxd"
-        minSdk = 33
+        minSdk = 28
         targetSdk = 37
         versionCode = (project.findProperty("versionCode") as String? ?: versionProps.getProperty("versionCode", "20")).toInt()
         versionName = project.findProperty("versionName") as String? ?: versionProps.getProperty("versionName", "1.7.3")
