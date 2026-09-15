@@ -38,7 +38,8 @@ android {
 
     defaultConfig {
         applicationId = "cn.nizou.sxd"
-        minSdk = 28
+        // 下限受 miuix-blur 0.9.4-rc01 的 manifest（minSdkVersion 33）约束，见 CI run 34990383604
+        minSdk = 33
         targetSdk = 37
         versionCode = (project.findProperty("versionCode") as String? ?: versionProps.getProperty("versionCode", "20")).toInt()
         versionName = project.findProperty("versionName") as String? ?: versionProps.getProperty("versionName", "1.7.3")
