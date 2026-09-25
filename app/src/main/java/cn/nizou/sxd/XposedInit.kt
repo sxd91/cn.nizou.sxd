@@ -124,6 +124,14 @@ class XposedInit : XposedModule() {
                             hostClassLoader = appClassLoader,
                         )
                     }.onFailure { Log.e("AutoOral", "SignProbe install failed", it) }
+                    // sign native 探针（方案 A）：shadowhook inline hook libRequestEncoder.so+0x60810。
+                    // getEncodedP 注册绕过 ART 反射层，Java hook 不可见，只能 native 层抓。
+                    // so 由 vgo 运行时才解压加载，轮询等它映射进进程。sign 破解后一并删除。
+                    runCatching {
+                        cn.nizou.sxd.util.SignProbeNative.startPolling(
+                            logPath = "/data/data/com.fenbi.android.leo/files/signprobe.log",
+                        )
+                    }.onFailure { Log.e("AutoOral", "SignProbeNative failed", it) }
                     // ActivityProxy can bypass Application callback delivery for its borrowed Activity shell.
                     // Hook the framework Activity resume path as the same direct reattach trigger Simian relies on.
                     runCatching {

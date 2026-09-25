@@ -18,7 +18,8 @@ materialkolor = "5.0.0"
 serialization = "1.11.0"
 # DexKit —— 版本适配：按方法参数类型/字符串引用在 dex 中定位混淆类与方法（高手方案，多版本 hook 兜底）
 dexkit = "2.0.6"
-
+# shadowhook —— native inline hook（sign 探针：挂 libRequestEncoder.so 内 getEncodedP）
+shadowhook = "1.1.1"
 [libraries]
 libxposed-api = { module = "io.github.libxposed:api", version.ref = "libxposed" }
 libxposed-service = { module = "io.github.libxposed:service", version.ref = "libxposed" }
@@ -45,6 +46,8 @@ materialkolor = { module = "com.materialkolor:material-kolor", version.ref = "ma
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 # --- DexKit（版本适配：按传参/字符串引用定位混淆类与方法；2.0 起坐标 org.luckypray） ---
 dexkit = { module = "org.luckypray:dexkit", version.ref = "dexkit" }
+# --- shadowhook（native inline hook，prefab C++ 库） ---
+shadowhook = { module = "com.bytedance.android:shadowhook", version.ref = "shadowhook" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

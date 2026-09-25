@@ -23,7 +23,7 @@ internal object SimianV2PkAutomation {
     /** One cancellable session owns every delayed stroke for the current exercise page. */
     fun scheduleStroke(webView: WebView, firstDelay: Long) {
         strokeSession?.let { active -> cancelStrokeSession(active.webView, "replaced by a new exercise page") }
-        val rewrittenSet = Simian.customTitleEnabled || Simian.modifyAnswer
+        val rewrittenSet = SimianV2AutomationPrefs.linkedCustomAnswer
         val nativeN = PkNativeSession.nativeQuestionCount
         val countSource = when { rewrittenSet -> "rewrite"; nativeN > 0 -> "native-match"; else -> "config" }
         val total = when {
@@ -148,42 +148,69 @@ internal object SimianV2PkAutomation {
         const kids = subTreeChildren(inst.subTree);
         for (const k of kids) { scanInstance(k, depth + 1); if (hitSeen) return; }
     };
-    // 找到挂在任意元素上的 Vue app 实例。宿主页面是 System.register + 远端 bundle 架构，
-    // #app 常常只是空壳容器，真正的 __vue_app__ 可能挂在内部子节点或其它元素上；
-    // 只查 #app 会漏，因此这里做三层兜底。
-    const findVueApp = () => {
-        const probe = [];
-        const appEl = document.getElementById('app');
+    // 在任意 document 根（含 iframe contentDocument、ShadowRoot）上找 __vue_app__。
+    // 宿主为 System.register + 远端 bundle 架构，createApp 的挂载点未必是 #app，
+    // 也可能落在 iframe / Shadow DOM / window / Vue 全局上，这里逐层兜底。
+    const findVueAppIn = rootDoc => {
+        if (!rootDoc || hitSeen) return null;
+        const appEl = rootDoc.getElementById ? rootDoc.getElementById('app') : null;
+        if (appEl && appEl.__vue_app__) return { app: appEl.__vue_app__, via: 'app-el' };
+        // 兜底 A：#app 后代 DFS，上限放宽到 400
         if (appEl) {
-            if (appEl.__vue_app__) return { app: appEl.__vue_app__, via: 'app-el' };
-            probe.push(appEl);
-        }
-        // 兜底 1：#app 的所有后代（深度优先，最多 200 个）
-        if (appEl) {
-            const stack = [appEl];
-            let n = 0;
-            while (stack.length && n < 200) {
+            const stack = [appEl]; let n = 0;
+            while (stack.length && n < 400) {
                 const cur = stack.pop(); n++;
                 if (cur.__vue_app__) return { app: cur.__vue_app__, via: 'app-descendant' };
                 const kids = cur.children;
                 if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
             }
         }
-        // 兜底 2：全文档扫（最多 2000 个元素）
-        const all = document.querySelectorAll('*');
-        const cap = Math.min(all.length, 2000);
+        // 兜底 B：全文档扫，含 shadowRoot 探测
+        const all = rootDoc.querySelectorAll ? rootDoc.querySelectorAll('*') : [];
+        const cap = Math.min(all.length, 4000);
         for (let i = 0; i < cap; i++) {
-            if (all[i].__vue_app__) return { app: all[i].__vue_app__, via: 'document-scan' };
+            const el = all[i];
+            if (el.__vue_app__) return { app: el.__vue_app__, via: 'document-scan' };
+            if (el.shadowRoot && el.shadowRoot.__vue_app__) return { app: el.shadowRoot.__vue_app__, via: 'shadow-root' };
+        }
+        // 兜底 C：window 直接挂载
+        if (rootDoc.defaultView && rootDoc.defaultView.__vue_app__) {
+            return { app: rootDoc.defaultView.__vue_app__, via: 'window' };
+        }
+        // 兜底 D：Vue 3 runtime 全局暴露
+        const w = rootDoc.defaultView || {};
+        if (w.Vue && w.Vue.__app__) return { app: w.Vue.__app__, via: 'vue-global' };
+        return null;
+    };
+
+    const findVueApp = () => {
+        let found = findVueAppIn(document);
+        if (found) return found;
+        const iframes = document.querySelectorAll('iframe');
+        for (let i = 0; i < iframes.length && i < 20; i++) {
+            let doc = null;
+            try { doc = iframes[i].contentDocument; } catch (_) { continue; }
+            if (!doc) continue;
+            found = findVueAppIn(doc);
+            if (found) { found.via = 'iframe:' + i + ':' + found.via; return found; }
         }
         return null;
     };
+    // 遍历一棵 Vue app：_instance 为空时回退到 container._vnode.component，
+    // 覆盖 createApp 挂载到非 #app 容器、或 #app 仅作外壳的情况。
+    const scanApp = app => {
+        if (!app || hitSeen) return;
+        let root = app._instance;
+        if (!root && app._container) root = app._container._vnode && app._container._vnode.component;
+        scanInstance(root, 0);
+    };
+
     const collect = () => {
         const found = findVueApp();
         status.vueAppVia = found ? found.via : 'none';
         if (!found) return null;
         const app = found.app;
-        const root = app._instance;
-        scanInstance(root, 0);
+        scanApp(app);
         status.walk = walkLog.slice(0, 40);
         status.walkCount = walkLog.length;
         if (hitSeen) { status.piniaFound = 1; return hitSeen; }
