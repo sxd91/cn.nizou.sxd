@@ -135,7 +135,47 @@ object SignProbeHelper {
                     write("addQueryParameter($k=$v)")
                 }
             }
-            // ---- 1b. 定位 sign 拦截器的真实类名并落盘其方法表 ----
+            // ---- 1b. 直接 hook sign native 入口：SecureStub.getEncodedP(String, String, int) -> String ----
+            // libRequestEncoder.so (JNI_OnLoad 动态注册) 是 solar-encoder 真身。
+            // Java 侧通过反射/动态代理调用，smali 里搜不到 invoke 指令。
+            // 但运行时 Class.forName 能找到类，hook native 方法即可拿到完整输入/输出。
+            runCatching {
+                val ss = Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, cl)
+                write("HOSTCLASS SecureStub found: ${ss.name}")
+                // getDeclaredMethods 可能看不到动态注册的 native 方法（JNI_OnLoad 注册的不在
+                // reflection 里）。改用.getMethod 试探。
+                val methods = ss.methods.filter { it.name.contains("getEncod") }
+                if (methods.isNotEmpty()) {
+                    methods.forEach { m ->
+                        m.isAccessible = true
+                        val builder = hookExecutable("securestub_getencod", m)
+                            as io.github.libxposed.api.XposedInterface.HookBuilder
+                        builder.intercept { chain ->
+                            val args = chain.args
+                            write("SecureStub.getEncodedP(" +
+                                "s1=${args.getOrNull(0)}, " +
+                                "s2=${args.getOrNull(1)}, " +
+                                "i=${args.getOrNull(2)})")
+                            val result = chain.proceed()
+                            write("  -> result=$result")
+                            result
+                        }
+                        write("hooked SecureStub.${m.name} x1")
+                    }
+                } else {
+                    // reflection 看不到 → 列出所有方法确认
+                    write("SecureStub all methods (${ss.methods.size}):")
+                    ss.methods.forEach { m ->
+                        write("  ${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }})->${m.returnType.simpleName}")
+                    }
+                    write("SecureStub declaredMethods (${ss.declaredMethods.size}):")
+                    ss.declaredMethods.forEach { m ->
+                        write("  ${m.name}(${m.parameterTypes.joinToString(",") { it.simpleName }})->${m.returnType.simpleName}")
+                    }
+                }
+            }.onFailure { write("SecureStub hook failed: $it") }
+
+            // ---- 1c. 定位 sign 拦截器的真实类名并落盘其方法表 ----
             // 真机栈显示 sign 写入点上游是 pv1.intercept / qm1.invoke（R8 混淆名）。
             // 在运行时按名字找到宿主类，dump declaredMethods 签名 —— 离线即可在
             // apktool_out 里按签名特征反查混淆前的实现（smali 里同名类在别的 dex 分卷）。
