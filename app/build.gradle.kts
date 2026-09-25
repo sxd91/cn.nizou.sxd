@@ -98,6 +98,8 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+        // prefab：把依赖 AAR 内的 native 库（shadowhook）暴露给 CMake find_package
+        prefab = true
     }
 }
 
