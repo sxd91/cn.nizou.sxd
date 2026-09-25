@@ -58,18 +58,20 @@ static void read_libcpp_string(void* sp, char* out, size_t outsz, size_t* outlen
     if (outlen) *outlen = len;
 }
 
-// ---------- hook: 0x6553c raw MD5 update 真实入口(ctx, data, len) ----------
+// ---------- hook: 0x6554c raw MD5 update 真实入口(ctx, data, len) ----------
 static void (*orig_md5raw)(void*, const void*, size_t) = nullptr;
 static void my_md5raw(void* ctx, const void* data, size_t len) {
-    char asc[300];
-    size_t n = len > 250 ? 250 : len;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char b = ((const unsigned char*)data)[i];
-        asc[i] = (b >= 32 && b < 127) ? (char)b : '.';
+    // 只记录长输入（>=100，即 chain 的第2/3/4轮），短输入是别的调用
+    if (len >= 100) {
+        static char asc[4096];
+        size_t n = len > 4000 ? 4000 : len;
+        for (size_t i = 0; i < n; i++) {
+            unsigned char b = ((const unsigned char*)data)[i];
+            asc[i] = (b >= 32 && b < 127) ? (char)b : '.';
+        }
+        asc[n] = 0;
+        native_log("MD5RAW[%zu] <%s>", len, asc);
     }
-    asc[n] = 0;
-    void* ra = __builtin_return_address(0);
-    native_log("MD5RAW[%zu] ra=%p <%s>", len, ra, asc);
     orig_md5raw(ctx, data, len);
 }
 
