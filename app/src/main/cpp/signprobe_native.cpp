@@ -58,18 +58,18 @@ static void read_libcpp_string(void* sp, char* out, size_t outsz, size_t* outlen
     if (outlen) *outlen = len;
 }
 
-// ---------- hook: 0x6554c raw MD5 update(ctx, data, len) ----------
+// ---------- hook: 0x6553c raw MD5 update 真实入口(ctx, data, len) ----------
 static void (*orig_md5raw)(void*, const void*, size_t) = nullptr;
 static void my_md5raw(void* ctx, const void* data, size_t len) {
-    char hex[1024], asc[256];
-    size_t n = len > 200 ? 200 : len;
+    char asc[300];
+    size_t n = len > 250 ? 250 : len;
     for (size_t i = 0; i < n; i++) {
         unsigned char b = ((const unsigned char*)data)[i];
-        sprintf(hex + i * 3, "%02x ", b);
         asc[i] = (b >= 32 && b < 127) ? (char)b : '.';
     }
-    hex[n * 3] = 0; asc[n] = 0;
-    native_log("MD5RAW[%zu] ascii=<%s> hex=%s", len, asc, hex);
+    asc[n] = 0;
+    void* ra = __builtin_return_address(0);
+    native_log("MD5RAW[%zu] ra=%p <%s>", len, ra, asc);
     orig_md5raw(ctx, data, len);
 }
 
@@ -138,7 +138,7 @@ Java_cn_nizou_sxd_util_SignProbeNative_installHook(JNIEnv* env, jclass, jstring 
 
     bool ok1 = hook_at(base + 0x64990, "MD5UPD", (void*)my_md5upd, (void**)&orig_md5upd);
     bool ok2 = hook_at(base + 0x61bf4, "GETENC", (void*)my_getEncodedP, (void**)&orig_getEncodedP);
-    bool ok3 = hook_at(base + 0x6554c, "MD5RAW", (void*)my_md5raw, (void**)&orig_md5raw);
+    bool ok3 = hook_at(base + 0x6553c, "MD5RAW", (void*)my_md5raw, (void**)&orig_md5raw);
     native_log("installHook: base=0x%lx MD5UPD=%s GETENC=%s MD5RAW=%s",
                (unsigned long)base, ok1 ? "OK" : "FAIL", ok2 ? "OK" : "FAIL", ok3 ? "OK" : "FAIL");
     return (ok1 || ok2 || ok3) ? 0 : -3;
