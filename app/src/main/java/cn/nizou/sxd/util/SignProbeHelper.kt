@@ -135,6 +135,20 @@ object SignProbeHelper {
                     write("addQueryParameter($k=$v)")
                 }
             }
+            // ---- 1b. 定位 sign 拦截器的真实类名并落盘其方法表 ----
+            // 真机栈显示 sign 写入点上游是 pv1.intercept / qm1.invoke（R8 混淆名）。
+            // 在运行时按名字找到宿主类，dump declaredMethods 签名 —— 离线即可在
+            // apktool_out 里按签名特征反查混淆前的实现（smali 里同名类在别的 dex 分卷）。
+            runCatching {
+                val hostCl = cl
+                for (name in listOf("pv1", "qm1")) {
+                    val c = runCatching { Class.forName(name, false, hostCl) }.getOrNull() ?: continue
+                    write("HOSTCLASS $name methods:")
+                    c.declaredMethods.forEach { m ->
+                        write("  ${m.name}${java.lang.reflect.Modifier.toString(m.modifiers)}(${m.parameterTypes.joinToString(",") { it.name }}) -> ${m.returnType.name}")
+                    }
+                }
+            }.onFailure { write("hostclass dump failed: $it") }
             hookMethod("okhttp3.HttpUrl\$Builder", "addEncodedQueryParameter", "url_add_enc") { args ->
                 val k = args.getOrNull(0)?.toString()
                 val v = args.getOrNull(1)?.toString()
