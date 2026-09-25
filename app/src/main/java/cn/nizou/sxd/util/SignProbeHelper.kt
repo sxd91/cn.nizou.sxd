@@ -122,64 +122,64 @@ object SignProbeHelper {
                     }
                 }
                 write("hooked $className.$methodName x${methods.size}")
+            }
+
             // ---- 1b前置. SecureStub.getEncodedP 探测（安全版） ----
             // ⚠️ 禁止 hook System.loadLibrary/load：Runtime.loadLibrary0 靠调用者栈帧
             // 定位 classloader，插入探针帧会让 getCallingClass 解析错乱 —— 真机
             // cb120db 实测：MMKV 找不到 libmmkv.so，宿主启动即崩（UnsatisfiedLinkError）。
             //
-            // 安全方案：hook InMemoryDexClassLoader 构造函数（崩溃栈/ANR dump 证实
-            // vgo 用它加载业务 dex）。每个新 loader 创建后探测其中的 SecureStub，
-            // 若带 native 方法（getEncodedP）立即 hook。不触碰 loadLibrary 栈语义。
-            fun hookSecureStubIn(loader: ClassLoader, from: String): Boolean {
-                return runCatching {
-                    val ss = Class.forName(
-                        "com.yuanfudao.android.leo.stub.SecureStub", false, loader,
-                    )
-                    val targets = ss.declaredMethods.filter { m ->
-                        java.lang.reflect.Modifier.isNative(m.modifiers) ||
-                            m.name.startsWith("getEncodedP")
-                    }
-                    if (targets.isEmpty()) {
-                        write("SecureStub probe($from): only ${ss.declaredMethods.joinToString(",") { it.name }}")
-                        return false
-                    }
-                    targets.forEach { m ->
-                        m.isAccessible = true
-                        @Suppress("UNCHECKED_CAST")
-                        val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
-                        builder.intercept { chain ->
-                            val args = chain.args
-                            write("SecureStub.${m.name}(" +
-                                "s1=${args.getOrNull(0)}, " +
-                                "s2=${args.getOrNull(1)}, " +
-                                "i=${args.getOrNull(2)})")
-                            val r = chain.proceed()
-                            write("  -> ${r}")
-                            r
+            // 方案 A（InMemoryDexClassLoader 构造 hook）：e96a007 实测 0 触发 ——
+            // vgo 业务 dex 不是运行时新建的内存 loader（那两个是系统注入的）。
+            //
+            // 方案 B（当前）：**按 so 加载状态轮询探测**。静态分析已确证
+            // libRequestEncoder.so 的 JNI_OnLoad 动态注册 getEncodedP
+            // (String,String,int)->String。so 从 vgo 缓存目录
+            // (/data/user/0/<pkg>/cache/native/host/*/libRequestEncoder.so) 加载。
+            // 启动后台线程：每 300ms 在 appClassLoader 上枚举 SecureStub 的
+            // declaredMethods，一旦出现 native 方法（即 RegisterNatives 已跑完）
+            // 立即 hook，然后退出轮询。不污染任何调用栈。
+            val probeThread = Thread {
+                var hooked = false
+                repeat(200) { // 最多 60s
+                    if (hooked) return@Thread
+                    runCatching {
+                        val ss = Class.forName(
+                            "com.yuanfudao.android.leo.stub.SecureStub", false, cl,
+                        )
+                        val natives = ss.declaredMethods.filter {
+                            java.lang.reflect.Modifier.isNative(it.modifiers) ||
+                                it.name.startsWith("getEncodedP")
                         }
-                        write("hooked SecureStub.${m.name} via $from loader")
-                    }
-                    true
-                }.getOrDefault(false)
-            }
-
-            runCatching {
-                val clz = Class.forName("dalvik.system.InMemoryDexClassLoader", false, cl)
-                clz.declaredConstructors.forEach { c ->
-                    c.isAccessible = true
-                    @Suppress("UNCHECKED_CAST")
-                    val builder = hookExecutable("inmemory_dexcl", c) as io.github.libxposed.api.XposedInterface.HookBuilder
-                    builder.intercept { chain ->
-                        val r = chain.proceed()
-                        runCatching {
-                            val loader = chain.thisObject as? ClassLoader ?: return@runCatching
-                            hookSecureStubIn(loader, "InMemoryDexClassLoader")
+                        if (natives.isNotEmpty()) {
+                            natives.forEach { m ->
+                                m.isAccessible = true
+                                @Suppress("UNCHECKED_CAST")
+                                val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
+                                builder.intercept { chain ->
+                                    val args = chain.args
+                                    write("SecureStub.${m.name}(" +
+                                        "s1=${args.getOrNull(0)}, " +
+                                        "s2=${args.getOrNull(1)}, " +
+                                        "i=${args.getOrNull(2)})")
+                                    val r = chain.proceed()
+                                    write("  -> ${r}")
+                                    r
+                                }
+                                write("hooked SecureStub.${m.name} (poll)")
+                            }
+                            hooked = true
                         }
-                        r
+                    }
+                    if (!hooked) {
+                        runCatching { Thread.sleep(300) }
                     }
                 }
-                write("hooked InMemoryDexClassLoader ctors x${clz.declaredConstructors.size}")
-            }.onFailure { write("InMemoryDexClassLoader hook failed: $it") }
+                if (!hooked) write("SecureStub poll: 60s 内未出现 native 方法")
+            }.apply {
+                name = "SignProbe-SecureStub-Poll"
+                isDaemon = true
+                start()
             }
 
             // ---- 1/2. HttpUrl.Builder 写 query ----
