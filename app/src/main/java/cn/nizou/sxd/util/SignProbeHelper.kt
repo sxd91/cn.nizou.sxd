@@ -123,54 +123,68 @@ object SignProbeHelper {
                 }
                 write("hooked $className.$methodName x${methods.size}")
             }
-
-                        // ---- 1b前置. 惰性 hook sign native 入口：SecureStub.getEncodedP ----
-            // libRequestEncoder.so 由 JNI_OnLoad 动态注册 getEncodedP，但注册发生在
-            // System.loadLibrary 之后 —— Application.attach 时枚举类是看不到它的
-            // （真机 19:45 取证：方法表只有 getString）。
-            // 二次取证（20:01，288fdc92）：sign 生成期间 appClassLoader 里的 SecureStub
-            // 仍只有 getString —— 真正注册 native 的 SecureStub 在**另一个 classloader**
-            // （vgo VirtualEnvKit 双类加载体系）。因此 hook 时逐个尝试 classloader 候选。
-            val secureStubHooked = java.util.concurrent.atomic.AtomicBoolean(false)
-            fun tryHookSecureStubOnce(candidates: List<ClassLoader?>) {
-                if (!secureStubHooked.compareAndSet(false, true)) return
-                var found = false
+            // ---- 1b前置. 惰性 hook sign native 入口：SecureStub.getEncodedP ----
+            // libRequestEncoder.so 由 JNI_OnLoad 动态注册 getEncodedP。
+            // 三轮真机取证：appClassLoader（及一切委托到它的候选）里的 SecureStub
+            // 都只有 getString —— vgo 虚拟环境的私有 loader 不在委托链上可见。
+            // 决定性方案：hook System.loadLibrary —— JNI_OnLoad 里 FindClass 用
+            // **调用方的 classloader**，即 System.loadLibrary("RequestEncoder")
+            // 那一刻调用者所在 loader 就是注册目标 loader，当场枚举 + hook。
+            fun tryHookSecureStubIn(loader: ClassLoader, from: String) {
                 runCatching {
-                    for (cand in candidates) {
-                        if (cand == null) continue
-                        val ss = runCatching {
-                            Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, cand)
-                        }.getOrNull() ?: continue
-                        val targets = ss.declaredMethods.filter { m ->
-                            java.lang.reflect.Modifier.isNative(m.modifiers) ||
-                                m.name.startsWith("getEncodedP")
-                        }
-                        if (targets.isEmpty()) {
-                            write("SecureStub re-probe via ${cand}: still no getEncodedP " +
-                                "(${ss.declaredMethods.joinToString(",") { it.name }}) cl=${ss.classLoader}")
-                            continue
-                        }
-                        targets.forEach { m ->
-                            m.isAccessible = true
-                            @Suppress("UNCHECKED_CAST")
-                            val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
-                            builder.intercept { chain ->
-                                val args = chain.args
-                                write("SecureStub.${m.name}(" +
-                                    "s1=${args.getOrNull(0)}, " +
-                                    "s2=${args.getOrNull(1)}, " +
-                                    "i=${args.getOrNull(2)})")
-                                val r = chain.proceed()
-                                write("  -> ${r}")
-                                r
-                            }
-                            write("hooked SecureStub.${m.name} (native=${java.lang.reflect.Modifier.isNative(m.modifiers)}) via $cand")
-                        }
-                        found = true
-                        break
+                    val ss = Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, loader)
+                    val targets = ss.declaredMethods.filter { m ->
+                        java.lang.reflect.Modifier.isNative(m.modifiers) ||
+                            m.name.startsWith("getEncodedP")
                     }
-                }.onFailure { write("SecureStub lazy hook failed: $it") }
-                if (!found) secureStubHooked.set(false) // 下次 sign 换别的候选再试
+                    if (targets.isEmpty()) {
+                        write("SecureStub probe($from, loader=$loader): only " +
+                            ss.declaredMethods.joinToString(",") { it.name })
+                        return
+                    }
+                    targets.forEach { m ->
+                        m.isAccessible = true
+                        @Suppress("UNCHECKED_CAST")
+                        val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
+                        builder.intercept { chain ->
+                            val args = chain.args
+                            write("SecureStub.${m.name}(" +
+                                "s1=${args.getOrNull(0)}, " +
+                                "s2=${args.getOrNull(1)}, " +
+                                "i=${args.getOrNull(2)})")
+                            val r = chain.proceed()
+                            write("  -> ${r}")
+                            r
+                        }
+                        write("hooked SecureStub.${m.name} via loader=$loader ($from)")
+                    }
+                }.onFailure { write("SecureStub probe($from) failed: $it") }
+            }
+
+            // hook System.loadLibrary / System.load：登记每个调用者的 loader；
+            // RequestEncoder 的 loader 到手后立即枚举 SecureStub。
+            hookMethod("java.lang.System", "loadLibrary", "sys_loadlib") { args ->
+                val lib = args.getOrNull(0)?.toString().orEmpty()
+                val frame = Throwable().stackTrace
+                    .firstOrNull { it.className.startsWith("com.fenbi") || it.className.startsWith("com.yuanfudao") }
+                val loader = frame?.let {
+                    runCatching { Class.forName(it.className, false, cl).classLoader }.getOrNull()
+                }
+                write("loadLibrary($lib) by=${frame?.className} loader=${loader?.toString()?.take(80)}")
+                if (lib.contains("RequestEncoder", true)) {
+                    loader?.let { tryHookSecureStubIn(it, "loadLibrary") }
+                }
+            }
+            hookMethod("java.lang.System", "load", "sys_load") { args ->
+                val path = args.getOrNull(0)?.toString().orEmpty()
+                if (!path.contains("RequestEncoder", true)) return@hookMethod
+                val frame = Throwable().stackTrace
+                    .firstOrNull { it.className.startsWith("com.fenbi") || it.className.startsWith("com.yuanfudao") }
+                val loader = frame?.let {
+                    runCatching { Class.forName(it.className, false, cl).classLoader }.getOrNull()
+                }
+                write("load($path) by=${frame?.className} loader=${loader?.toString()?.take(80)}")
+                loader?.let { tryHookSecureStubIn(it, "load") }
             }
 
             // ---- 1/2. HttpUrl.Builder 写 query ----
@@ -178,22 +192,9 @@ object SignProbeHelper {
                 val k = args.getOrNull(0)?.toString()
                 val v = args.getOrNull(1)?.toString()
                 if (k == "sign") {
-                    // sign 已被写入 —— 说明网络栈已活、libRequestEncoder.so 必已加载。
-                    // classloader 候选：写入者自身 > 线程 context > 宿主 app。
-                    // （20:01 取证：appClassLoader 里的 SecureStub 没有 getEncodedP，
-                    //  真身在 vgo 虚拟环境 classloader —— 由写入者类反查它的 loader 最准。）
-                    val writerCl = runCatching {
-                        val frame = Throwable().stackTrace
-                            .firstOrNull { it.className == "pv1" || it.className == "qm1" }
-                        frame?.let { Class.forName(it.className, false, cl).classLoader }
-                    }.getOrNull()
-                    tryHookSecureStubOnce(
-                        listOf(
-                            writerCl,
-                            Thread.currentThread().contextClassLoader,
-                            cl,
-                        ),
-                    )
+                    // sign 已被写入 —— 网络栈已活。若 loadLibrary 时机错过（如库在
+                    // attach 之前已加载），再补一次「全 loader 扫描」兜底。
+                    tryHookSecureStubIn(cl, "sign-fallback")
                     write("addQueryParameter($k=$v)")
                     writeStack("  ^^")
                 } else if (k == "_productId") {
