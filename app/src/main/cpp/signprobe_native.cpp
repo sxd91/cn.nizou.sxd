@@ -73,18 +73,6 @@ static void my_md5raw(void* ctx, const void* data, size_t len) {
     orig_md5raw(ctx, data, len);
 }
 
-// ---------- hook: 0x66a64 sign 链函数(out, A, B, C) ----------
-static void (*orig_66a64)(void*, void*, void*, int) = nullptr;
-static void my_66a64(void* out, void* A, void* B, int C) {
-    char a[512] = {0}, b[512] = {0};
-    read_libcpp_string(A, a, sizeof(a), nullptr);
-    read_libcpp_string(B, b, sizeof(b), nullptr);
-    orig_66a64(out, A, B, C);
-    char r[512] = {0};
-    read_libcpp_string(out, r, sizeof(r), nullptr);
-    native_log("66A64 A=<%s> B=<%s> C=%d -> <%s>", a, b, C, r);
-}
-
 // ---------- hook: 0x64990 MD5-reset+update(ctx, string) ----------
 static void (*orig_md5upd)(void*, void*) = nullptr;
 static void my_md5upd(void* ctx, void* sp) {
@@ -92,17 +80,8 @@ static void my_md5upd(void* ctx, void* sp) {
     size_t len = 0;
     read_libcpp_string(sp, buf, sizeof(buf), &len);
     void* ra = __builtin_return_address(0);
+    native_log("MD5UPD[%zu] ra=%p in=%s", len, ra, buf);
     orig_md5upd(ctx, sp);
-    // 调用后 dump ctx 0x40..0x80，定位 digest
-    unsigned char* p = (unsigned char*)ctx;
-    char dump[200];
-    int o = 0;
-    for (int i = 0x40; i < 0x80; i += 16) {
-        o += sprintf(dump + o, "[%02x]", i);
-        for (int j = 0; j < 16; j++) o += sprintf(dump + o, "%02x", p[i + j]);
-        o += sprintf(dump + o, " ");
-    }
-    native_log("MD5UPD[%zu] ra=%p in=%s ctx=%s", len, ra, buf, dump);
 }
 
 // ---------- hook: 0x61bf4 getEncodedP(env, clazz, s1, s2, i) ----------
@@ -160,9 +139,7 @@ Java_cn_nizou_sxd_util_SignProbeNative_installHook(JNIEnv* env, jclass, jstring 
     bool ok1 = hook_at(base + 0x64990, "MD5UPD", (void*)my_md5upd, (void**)&orig_md5upd);
     bool ok2 = hook_at(base + 0x61bf4, "GETENC", (void*)my_getEncodedP, (void**)&orig_getEncodedP);
     bool ok3 = hook_at(base + 0x6554c, "MD5RAW", (void*)my_md5raw, (void**)&orig_md5raw);
-    bool ok4 = hook_at(base + 0x66a64, "CHAIN", (void*)my_66a64, (void**)&orig_66a64);
-    native_log("installHook: base=0x%lx MD5UPD=%s GETENC=%s MD5RAW=%s CHAIN=%s",
-               (unsigned long)base, ok1 ? "OK" : "FAIL", ok2 ? "OK" : "FAIL",
-               ok3 ? "OK" : "FAIL", ok4 ? "OK" : "FAIL");
-    return (ok1 || ok2 || ok3 || ok4) ? 0 : -3;
+    native_log("installHook: base=0x%lx MD5UPD=%s GETENC=%s MD5RAW=%s",
+               (unsigned long)base, ok1 ? "OK" : "FAIL", ok2 ? "OK" : "FAIL", ok3 ? "OK" : "FAIL");
+    return (ok1 || ok2 || ok3) ? 0 : -3;
 }
