@@ -80,8 +80,13 @@ object SignProbeHelper {
     fun install(
         hookExecutable: (String, java.lang.reflect.Executable) -> Any,
         xlog: (Int, String, String) -> Unit,
+        hostClassLoader: ClassLoader,
     ) {
-        val cl = SignProbeHelper::class.java.classLoader ?: return
+        // 关键：宿主的 okhttp3 类要用**宿主 classLoader** 查 —— 模块自己的
+        // classLoader 里没有 okhttp（模块 compileOnly 依赖不打进包），
+        // Class.forName 会抛 ClassNotFoundException。
+        // java.security.MessageDigest 是系统类，两个 loader 一致，不受影响。
+        val cl = hostClassLoader
         val write: (String) -> Unit = { line -> log(xlog, line) }
         val writeStack: (String) -> Unit = { prefix ->
             log(xlog, prefix + " STACK:")

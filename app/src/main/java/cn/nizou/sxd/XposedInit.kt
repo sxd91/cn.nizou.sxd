@@ -121,6 +121,7 @@ class XposedInit : XposedModule() {
                         cn.nizou.sxd.util.SignProbeHelper.install(
                             hookExecutable = { id, ex -> hookExecutable(id, ex) },
                             xlog = { pri, tag, msg -> log(pri, tag, msg) },
+                            hostClassLoader = appClassLoader,
                         )
                     }.onFailure { Log.e("AutoOral", "SignProbe install failed", it) }
                     // ActivityProxy can bypass Application callback delivery for its borrowed Activity shell.
