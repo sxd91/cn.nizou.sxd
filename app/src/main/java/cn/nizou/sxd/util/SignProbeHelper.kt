@@ -122,25 +122,26 @@ object SignProbeHelper {
                     }
                 }
                 write("hooked $className.$methodName x${methods.size}")
-            }
-            // ---- 1b前置. 惰性 hook sign native 入口：SecureStub.getEncodedP ----
-            // libRequestEncoder.so 由 JNI_OnLoad 动态注册 getEncodedP。
-            // 三轮真机取证：appClassLoader（及一切委托到它的候选）里的 SecureStub
-            // 都只有 getString —— vgo 虚拟环境的私有 loader 不在委托链上可见。
-            // 决定性方案：hook System.loadLibrary —— JNI_OnLoad 里 FindClass 用
-            // **调用方的 classloader**，即 System.loadLibrary("RequestEncoder")
-            // 那一刻调用者所在 loader 就是注册目标 loader，当场枚举 + hook。
-            fun tryHookSecureStubIn(loader: ClassLoader, from: String) {
-                runCatching {
-                    val ss = Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, loader)
+            // ---- 1b前置. SecureStub.getEncodedP 探测（安全版） ----
+            // ⚠️ 禁止 hook System.loadLibrary/load：Runtime.loadLibrary0 靠调用者栈帧
+            // 定位 classloader，插入探针帧会让 getCallingClass 解析错乱 —— 真机
+            // cb120db 实测：MMKV 找不到 libmmkv.so，宿主启动即崩（UnsatisfiedLinkError）。
+            //
+            // 安全方案：hook InMemoryDexClassLoader 构造函数（崩溃栈/ANR dump 证实
+            // vgo 用它加载业务 dex）。每个新 loader 创建后探测其中的 SecureStub，
+            // 若带 native 方法（getEncodedP）立即 hook。不触碰 loadLibrary 栈语义。
+            fun hookSecureStubIn(loader: ClassLoader, from: String): Boolean {
+                return runCatching {
+                    val ss = Class.forName(
+                        "com.yuanfudao.android.leo.stub.SecureStub", false, loader,
+                    )
                     val targets = ss.declaredMethods.filter { m ->
                         java.lang.reflect.Modifier.isNative(m.modifiers) ||
                             m.name.startsWith("getEncodedP")
                     }
                     if (targets.isEmpty()) {
-                        write("SecureStub probe($from, loader=$loader): only " +
-                            ss.declaredMethods.joinToString(",") { it.name })
-                        return
+                        write("SecureStub probe($from): only ${ss.declaredMethods.joinToString(",") { it.name }}")
+                        return false
                     }
                     targets.forEach { m ->
                         m.isAccessible = true
@@ -156,35 +157,29 @@ object SignProbeHelper {
                             write("  -> ${r}")
                             r
                         }
-                        write("hooked SecureStub.${m.name} via loader=$loader ($from)")
+                        write("hooked SecureStub.${m.name} via $from loader")
                     }
-                }.onFailure { write("SecureStub probe($from) failed: $it") }
+                    true
+                }.getOrDefault(false)
             }
 
-            // hook System.loadLibrary / System.load：登记每个调用者的 loader；
-            // RequestEncoder 的 loader 到手后立即枚举 SecureStub。
-            hookMethod("java.lang.System", "loadLibrary", "sys_loadlib") { args ->
-                val lib = args.getOrNull(0)?.toString().orEmpty()
-                val frame = Throwable().stackTrace
-                    .firstOrNull { it.className.startsWith("com.fenbi") || it.className.startsWith("com.yuanfudao") }
-                val loader = frame?.let {
-                    runCatching { Class.forName(it.className, false, cl).classLoader }.getOrNull()
+            runCatching {
+                val clz = Class.forName("dalvik.system.InMemoryDexClassLoader", false, cl)
+                clz.declaredConstructors.forEach { c ->
+                    c.isAccessible = true
+                    @Suppress("UNCHECKED_CAST")
+                    val builder = hookExecutable("inmemory_dexcl", c) as io.github.libxposed.api.XposedInterface.HookBuilder
+                    builder.intercept { chain ->
+                        val r = chain.proceed()
+                        runCatching {
+                            val loader = chain.thisObject as? ClassLoader ?: return@runCatching
+                            hookSecureStubIn(loader, "InMemoryDexClassLoader")
+                        }
+                        r
+                    }
                 }
-                write("loadLibrary($lib) by=${frame?.className} loader=${loader?.toString()?.take(80)}")
-                if (lib.contains("RequestEncoder", true)) {
-                    loader?.let { tryHookSecureStubIn(it, "loadLibrary") }
-                }
-            }
-            hookMethod("java.lang.System", "load", "sys_load") { args ->
-                val path = args.getOrNull(0)?.toString().orEmpty()
-                if (!path.contains("RequestEncoder", true)) return@hookMethod
-                val frame = Throwable().stackTrace
-                    .firstOrNull { it.className.startsWith("com.fenbi") || it.className.startsWith("com.yuanfudao") }
-                val loader = frame?.let {
-                    runCatching { Class.forName(it.className, false, cl).classLoader }.getOrNull()
-                }
-                write("load($path) by=${frame?.className} loader=${loader?.toString()?.take(80)}")
-                loader?.let { tryHookSecureStubIn(it, "load") }
+                write("hooked InMemoryDexClassLoader ctors x${clz.declaredConstructors.size}")
+            }.onFailure { write("InMemoryDexClassLoader hook failed: $it") }
             }
 
             // ---- 1/2. HttpUrl.Builder 写 query ----
@@ -192,9 +187,6 @@ object SignProbeHelper {
                 val k = args.getOrNull(0)?.toString()
                 val v = args.getOrNull(1)?.toString()
                 if (k == "sign") {
-                    // sign 已被写入 —— 网络栈已活。若 loadLibrary 时机错过（如库在
-                    // attach 之前已加载），再补一次「全 loader 扫描」兜底。
-                    tryHookSecureStubIn(cl, "sign-fallback")
                     write("addQueryParameter($k=$v)")
                     writeStack("  ^^")
                 } else if (k == "_productId") {
