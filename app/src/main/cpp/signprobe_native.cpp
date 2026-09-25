@@ -79,7 +79,8 @@ static void my_md5upd(void* ctx, void* sp) {
     char buf[4096];
     size_t len = 0;
     read_libcpp_string(sp, buf, sizeof(buf), &len);
-    native_log("MD5UPD[%zu] %s", len, buf);
+    void* ra = __builtin_return_address(0);
+    native_log("MD5UPD[%zu] ra=%p %s", len, ra, buf);
     orig_md5upd(ctx, sp);
 }
 
