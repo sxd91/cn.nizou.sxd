@@ -124,45 +124,53 @@ object SignProbeHelper {
                 write("hooked $className.$methodName x${methods.size}")
             }
 
-            // ---- 1b前置. 惰性 hook sign native 入口：SecureStub.getEncodedP ----
+                        // ---- 1b前置. 惰性 hook sign native 入口：SecureStub.getEncodedP ----
             // libRequestEncoder.so 由 JNI_OnLoad 动态注册 getEncodedP，但注册发生在
             // System.loadLibrary 之后 —— Application.attach 时枚举类是看不到它的
             // （真机 19:45 取证：方法表只有 getString）。
-            // 因此改为**惰性**：第一次观察到 sign 写入（说明网络栈已活、库必已加载）
-            // 时再枚举 + hook。用 AtomicBoolean 保证只装一次。
+            // 二次取证（20:01，288fdc92）：sign 生成期间 appClassLoader 里的 SecureStub
+            // 仍只有 getString —— 真正注册 native 的 SecureStub 在**另一个 classloader**
+            // （vgo VirtualEnvKit 双类加载体系）。因此 hook 时逐个尝试 classloader 候选。
             val secureStubHooked = java.util.concurrent.atomic.AtomicBoolean(false)
-            fun tryHookSecureStubOnce() {
+            fun tryHookSecureStubOnce(candidates: List<ClassLoader?>) {
                 if (!secureStubHooked.compareAndSet(false, true)) return
+                var found = false
                 runCatching {
-                    val ss = Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, cl)
-                    val targets = ss.declaredMethods.filter { m ->
-                        java.lang.reflect.Modifier.isNative(m.modifiers) ||
-                            m.name.startsWith("getEncodedP") ||
-                            m.parameterTypes.size == 3
-                    }
-                    if (targets.isEmpty()) {
-                        write("SecureStub re-probe: still no getEncodedP (${ss.declaredMethods.size} methods: " +
-                            ss.declaredMethods.joinToString(",") { it.name } + ")")
-                        secureStubHooked.set(false) // 下次 sign 再试
-                        return
-                    }
-                    targets.forEach { m ->
-                        m.isAccessible = true
-                        @Suppress("UNCHECKED_CAST")
-                        val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
-                        builder.intercept { chain ->
-                            val args = chain.args
-                            write("SecureStub.${m.name}(" +
-                                "s1=${args.getOrNull(0)}, " +
-                                "s2=${args.getOrNull(1)}, " +
-                                "i=${args.getOrNull(2)})")
-                            val r = chain.proceed()
-                            write("  -> ${r}")
-                            r
+                    for (cand in candidates) {
+                        if (cand == null) continue
+                        val ss = runCatching {
+                            Class.forName("com.yuanfudao.android.leo.stub.SecureStub", false, cand)
+                        }.getOrNull() ?: continue
+                        val targets = ss.declaredMethods.filter { m ->
+                            java.lang.reflect.Modifier.isNative(m.modifiers) ||
+                                m.name.startsWith("getEncodedP")
                         }
-                        write("hooked SecureStub.${m.name} (native=${java.lang.reflect.Modifier.isNative(m.modifiers)})")
+                        if (targets.isEmpty()) {
+                            write("SecureStub re-probe via ${cand}: still no getEncodedP " +
+                                "(${ss.declaredMethods.joinToString(",") { it.name }}) cl=${ss.classLoader}")
+                            continue
+                        }
+                        targets.forEach { m ->
+                            m.isAccessible = true
+                            @Suppress("UNCHECKED_CAST")
+                            val builder = hookExecutable("securestub_native", m) as io.github.libxposed.api.XposedInterface.HookBuilder
+                            builder.intercept { chain ->
+                                val args = chain.args
+                                write("SecureStub.${m.name}(" +
+                                    "s1=${args.getOrNull(0)}, " +
+                                    "s2=${args.getOrNull(1)}, " +
+                                    "i=${args.getOrNull(2)})")
+                                val r = chain.proceed()
+                                write("  -> ${r}")
+                                r
+                            }
+                            write("hooked SecureStub.${m.name} (native=${java.lang.reflect.Modifier.isNative(m.modifiers)}) via $cand")
+                        }
+                        found = true
+                        break
                     }
                 }.onFailure { write("SecureStub lazy hook failed: $it") }
+                if (!found) secureStubHooked.set(false) // 下次 sign 换别的候选再试
             }
 
             // ---- 1/2. HttpUrl.Builder 写 query ----
@@ -170,10 +178,22 @@ object SignProbeHelper {
                 val k = args.getOrNull(0)?.toString()
                 val v = args.getOrNull(1)?.toString()
                 if (k == "sign") {
-                    // sign 已被写入 —— 说明网络栈已活、libRequestEncoder.so 必已加载，
-                    // 此时惰性枚举 SecureStub 才能看到动态注册的 getEncodedP。
-                    // 注意：hook 只对**下一次**调用生效（本调用来不及），多刷几个请求即可。
-                    tryHookSecureStubOnce()
+                    // sign 已被写入 —— 说明网络栈已活、libRequestEncoder.so 必已加载。
+                    // classloader 候选：写入者自身 > 线程 context > 宿主 app。
+                    // （20:01 取证：appClassLoader 里的 SecureStub 没有 getEncodedP，
+                    //  真身在 vgo 虚拟环境 classloader —— 由写入者类反查它的 loader 最准。）
+                    val writerCl = runCatching {
+                        val frame = Throwable().stackTrace
+                            .firstOrNull { it.className == "pv1" || it.className == "qm1" }
+                        frame?.let { Class.forName(it.className, false, cl).classLoader }
+                    }.getOrNull()
+                    tryHookSecureStubOnce(
+                        listOf(
+                            writerCl,
+                            Thread.currentThread().contextClassLoader,
+                            cl,
+                        ),
+                    )
                     write("addQueryParameter($k=$v)")
                     writeStack("  ^^")
                 } else if (k == "_productId") {
