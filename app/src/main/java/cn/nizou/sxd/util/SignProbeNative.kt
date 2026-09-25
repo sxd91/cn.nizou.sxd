@@ -21,8 +21,8 @@ object SignProbeNative {
         System.loadLibrary("signprobe_native")
     }
 
-    /** native 侧安装 hook。返回 0=成功，-1=so未加载，-2=init失败，-3=hook失败 */
-    private external fun installHook(logPath: String, offset: Int): Int
+    /** native 侧安装 hook。返回 0=成功，-1=so未加载，-3=hook失败 */
+    private external fun installHook(logPath: String): Int
 
     /**
      * 轮询等 libRequestEncoder.so 映射进进程后安装 hook。
@@ -35,7 +35,7 @@ object SignProbeNative {
             while (System.currentTimeMillis() < deadline) {
                 attempt++
                 val rc = try {
-                    installHook(logPath, GET_ENCODED_P_OFFSET)
+                    installHook(logPath)
                 } catch (t: Throwable) {
                     SignProbeHelper.log(null, "NATIVE installHook threw: $t")
                     return@Thread
