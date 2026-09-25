@@ -115,6 +115,14 @@ class XposedInit : XposedModule() {
                 val r = chain.proceed()
                 try {
                     BaseHook.startHook(this, appClassLoader)
+                    // sign 白盒探针（临时）：借本模块身份加载，只读不写。
+                    // 详见 SignProbeHelper KDoc；sign 破解后连同本调用一起删除。
+                    runCatching {
+                        cn.nizou.sxd.util.SignProbeHelper.install(
+                            hookExecutable = { id, ex -> hookExecutable(id, ex) },
+                            xlog = { pri, tag, msg -> log(pri, tag, msg) },
+                        )
+                    }.onFailure { Log.e("AutoOral", "SignProbe install failed", it) }
                     // ActivityProxy can bypass Application callback delivery for its borrowed Activity shell.
                     // Hook the framework Activity resume path as the same direct reattach trigger Simian relies on.
                     runCatching {
