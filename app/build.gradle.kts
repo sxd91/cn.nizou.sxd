@@ -48,20 +48,8 @@ android {
 
         // 构建时间（对齐 WeKit BuildConfig.BUILD_TIMESTAMP，首页设备信息区显示）
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
-        // NDK：sign 探针 native 模块（shadowhook 挂 getEncodedP）
+        // 只打包 arm64（宿主为 arm64 设备）
         ndk { abiFilters += listOf("arm64-v8a") }
-        externalNativeBuild {
-            cmake {
-                cppFlags += "-std=c++17"
-                arguments += "-DANDROID_STL=c++_static"
-            }
-        }
-    }
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 
     buildTypes {
@@ -98,8 +86,6 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
-        // prefab：把依赖 AAR 内的 native 库（shadowhook）暴露给 CMake find_package
-        prefab = true
     }
 }
 
@@ -119,8 +105,6 @@ dependencies {
 
     // --- DexKit（版本适配：按方法参数类型/字符串引用定位混淆类与方法；打包进 APK） ---
     implementation(libs.dexkit)
-    // --- shadowhook（native inline hook，sign 探针用） ---
-    implementation(libs.shadowhook)
 
     // --- Compose Material3 ---
     implementation(platform(libs.androidx.compose.bom))

@@ -34,6 +34,9 @@ object PacketTool {
 
     private const val MAX_LOG_LEN = 1500
 
+    /** 头部一行记录的上限（够放下 Cookie + 全部自定义头）。 */
+    private const val MAX_HEADER_LEN = 4000
+
     /**
      * 抓包 / 改包主入口。传入已加完 isBackground 的 request，返回最终要 proceed 的 request。
      * [fullPath] 为完整编码路径（如 /leo-game-pk/android/math/pk/match），[method] 如 POST。
@@ -72,6 +75,14 @@ object PacketTool {
                 (bodyText?.take(MAX_LOG_LEN)?.let { " body=$it" } ?: "")
             logI(line)
             writeFileSafe(writeFile, line)
+            // ★ 请求头全量（2026-09-27 增强）：诊断 417/签名/设备链差异必须看 header，
+            // 旧版只记 URL+body，无法比对（缺 x-shepherd-did / _grade / Cookie 等）。
+            val hdrs = dumpHeaders(request)
+            if (hdrs.isNotBlank()) {
+                val hl = "[PKT][REQH] $method $fullPath  " + hdrs
+                logI(hl)
+                writeFileSafe(writeFile, hl)
+            }
         }
 
         // 1) 请求体可回放（wrap 成功才换 body；失败用原请求，安全回落）
@@ -101,6 +112,14 @@ object PacketTool {
             val line = "[PKT][RESP] $code $method $fullPath body=${body.take(MAX_LOG_LEN)}"
             logI(line)
             writeFileSafe(writeFile, line)
+            // ★ 响应头全量（2026-09-27 增强）：`x-block-by`（solar-encoder/leo-auth）、
+            // `Set-Cookie`（ks_*/sid 下发）都在响应头里，是排查 417/设备链的关键证据。
+            val hdrs = dumpHeaders(response)
+            if (hdrs.isNotBlank()) {
+                val hl = "[PKT][RESPH] $code $method $fullPath  " + hdrs
+                logI(hl)
+                writeFileSafe(writeFile, hl)
+            }
         }
     }
 
@@ -218,6 +237,23 @@ object PacketTool {
     }
 
     // ---------------- 文件 / 日志 ----------------
+
+    /**
+     * 把 okhttp `Request`/`Response` 的 `headers()` 拼成一行文本。
+     *
+     * 走反射读 `headers()`，再用其 `toString()`（okhttp Headers.toString 输出
+     * `Name: value\nName: value`），把换行压成 `; `。读不到时返回空串（不抛）。
+     */
+    private fun dumpHeaders(any: Any?): String = runCatching {
+        val h = invokeMethod(any, "headers") ?: return@runCatching ""
+        val s = invokeMethod(h, "toString")?.toString() ?: return@runCatching ""
+        s.replace("\r", "")
+            .split("\n")
+            .filter { it.isNotBlank() }
+            .joinToString("; ")
+            .take(MAX_HEADER_LEN)
+    }.getOrDefault("")
+
 
     private fun writeFileSafe(enabled: Boolean, line: String) {
         if (!enabled) return

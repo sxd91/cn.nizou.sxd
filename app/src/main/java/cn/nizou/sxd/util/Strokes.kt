@@ -85,18 +85,58 @@ private fun extractLibFromApk(self: XposedModule): File? = runCatching {
 val String.nativeStrokes: List<Array<DoubleArray>>
     external get
 
-val String.strokes: List<Array<PointF>> get() {
-    if (!ensureNativeLoaded()) return emptyList()
-    return nativeStrokes.map {
-        it.map { PointF(it[0].toFloat(), it[1].toFloat()) }.toTypedArray()
-    }.also {
-        logI("answer: $this, strokes: ${it.size}")
+/**
+ * 纯 Kotlin 笔画生成（**不依赖 native**）。
+ *
+ * ## 为什么需要它（2026-09-27）
+ *
+ * `nativeStrokes` 由内置 `libauto_oral.so` 提供，但该 so 是 AOC(TinyHai) 编的
+ * （Rust + jni crate）。反查其动态符号：**只导出 `JNI_OnLoad`，没有 `Java_*` 导出**，
+ * 且内部字符串里查不到 `cn.nizou.sxd` / `Strokes` 之类注册目标类名 —— 它应是按
+ * AOC 自己的类名 `RegisterNatives`。本模块调用 `nativeStrokes` 会抛
+ * `UnsatisfiedLinkError`（或返回空）→ **script 为空 → 被判「未作画/单点」风控**。
+ * 这就是「画笔提交」失效的根因。
+ *
+ * 本函数给出服务端能识别为真实手写的连续线段笔画：每条 24 个密集点、y 平滑下移、
+ * x 带手抖摆动（与 [cn.nizou.sxd.hook.WebViewHook.buildStrokeLine] 同款思路，
+ * 那条竖线方案在真机 PK 上验证不触发风控）。逐字符生成（答案 "12" → 两条笔画），
+ * 字符间横向错开，避免叠成一点。
+ */
+fun String.kotlinStrokes(): List<Array<PointF>> {
+    if (isEmpty()) return listOf(buildDenseStroke(40.0, 30.0))
+    return mapIndexed { idx, _ ->
+        buildDenseStroke(x0 = 40.0 + idx * 26.0, y0 = 30.0 + (idx % 2) * 3.0)
     }
 }
 
+/** 一条密集连续线段（24 点，带手抖摆动），坐标与 native 版同量级（数十 px）。 */
+private fun buildDenseStroke(x0: Double, y0: Double, n: Int = 24): Array<PointF> {
+    return Array(n) { i ->
+        val t = i.toDouble() / (n - 1)
+        val x = x0 + kotlin.math.sin(t * Math.PI) * 2.0 + (if (i % 2 == 0) 0.4 else -0.4)
+        val y = y0 + t * 60.0
+        PointF(x.toFloat(), y.toFloat())
+    }
+}
+
+val String.strokes: List<Array<PointF>> get() {
+    // 优先 native；失败/为空回落纯 Kotlin。
+    // 注意 nativeStrokes 抛的是 Error(UnsatisfiedLinkError)，必须 catch Throwable，
+    // 否则会直接把宿主崩掉（Java 的 catch(Exception) 接不住）。
+    val native = runCatching { if (ensureNativeLoaded()) nativeStrokes else null }.getOrNull()
+    if (!native.isNullOrEmpty()) {
+        return native.map { it.map { p -> PointF(p[0].toFloat(), p[1].toFloat()) }.toTypedArray() }
+            .also { logI("answer: $this, native strokes: ${it.size}") }
+    }
+    return kotlinStrokes().also { logI("answer: $this, kotlin strokes: ${it.size}") }
+}
+
 val String.pathPoints get(): List<Array<DoubleArray>> {
-    if (!ensureNativeLoaded()) return emptyList()
-    return nativeStrokes
+    val native = runCatching { if (ensureNativeLoaded()) nativeStrokes else null }.getOrNull()
+    if (!native.isNullOrEmpty()) return native
+    return kotlinStrokes().map { stroke ->
+        stroke.map { doubleArrayOf(it.x.toDouble(), it.y.toDouble()) }.toTypedArray()
+    }
 }
 
 fun List<Array<*>>.toJsonString(): String {

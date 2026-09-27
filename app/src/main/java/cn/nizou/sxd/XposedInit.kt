@@ -115,23 +115,10 @@ class XposedInit : XposedModule() {
                 val r = chain.proceed()
                 try {
                     BaseHook.startHook(this, appClassLoader)
-                    // sign 白盒探针（临时）：借本模块身份加载，只读不写。
-                    // 详见 SignProbeHelper KDoc；sign 破解后连同本调用一起删除。
-                    runCatching {
-                        cn.nizou.sxd.util.SignProbeHelper.install(
-                            hookExecutable = { id, ex -> hookExecutable(id, ex) },
-                            xlog = { pri, tag, msg -> log(pri, tag, msg) },
-                            hostClassLoader = appClassLoader,
-                        )
-                    }.onFailure { Log.e("AutoOral", "SignProbe install failed", it) }
-                    // sign native 探针（方案 A）：shadowhook inline hook libRequestEncoder.so+0x60810。
-                    // getEncodedP 注册绕过 ART 反射层，Java hook 不可见，只能 native 层抓。
-                    // so 由 vgo 运行时才解压加载，轮询等它映射进进程。sign 破解后一并删除。
-                    runCatching {
-                        cn.nizou.sxd.util.SignProbeNative.startPolling(
-                            logPath = "/data/data/com.fenbi.android.leo/files/signprobe.log",
-                        )
-                    }.onFailure { Log.e("AutoOral", "SignProbeNative failed", it) }
+                    // （sign 白盒/native 探针已移除：native inline hook（shadowhook 挂
+                    //  libRequestEncoder.so）实测会把宿主搞崩（MMKV UnsatisfiedLinkError / SIGSEGV），
+                    //  且 Java 层 hook 根本抓不到 getEncodedP（注册绕过 ART 反射）。
+                    //  sign 用「设备 harness 直调 so」方案解决，见记忆。）
                     // ActivityProxy can bypass Application callback delivery for its borrowed Activity shell.
                     // Hook the framework Activity resume path as the same direct reattach trigger Simian relies on.
                     runCatching {
