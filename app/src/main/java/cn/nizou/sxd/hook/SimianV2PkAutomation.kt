@@ -135,14 +135,16 @@ internal object SimianV2PkAutomation {
             cfgKeypoint: cfgObj && cfgObj.keypointId
         };
         walkLog.push(rec);
-        if (hasPad && isPad(padObj) && isLive(cfgObj)) {
-            hitSeen = { source: 'vue-setup-pad', pad: padObj, config: cfgObj };
+        // 放宽：拿到真实画板即命中（config 可能晚于画板就绪，不能因此错过窗期）。
+        if (hasPad && isPad(padObj)) {
+            hitSeen = { source: 'vue-setup-pad', pad: padObj, config: cfgObj || {}, live: isLive(cfgObj) };
             return;
         }
         const ctx = inst.ctx || {};
         const ctxPad = unref(ctx.pad);
-        if (ctxPad && isPad(ctxPad) && isLive(unref(ctx.recognizeConfig))) {
-            hitSeen = { source: 'vue-ctx-pad', pad: ctxPad, config: unref(ctx.recognizeConfig) };
+        if (ctxPad && isPad(ctxPad)) {
+            const ctxCfg = unref(ctx.recognizeConfig) || {};
+            hitSeen = { source: 'vue-ctx-pad', pad: ctxPad, config: ctxCfg, live: isLive(ctxCfg) };
             return;
         }
         const kids = subTreeChildren(inst.subTree);
@@ -205,7 +207,47 @@ internal object SimianV2PkAutomation {
         scanInstance(root, 0);
     };
 
+    // ---- 最稳的一条路：直接扫 DOM ----
+    // Vue3 在组件挂载的**每个元素**上挂 `__vueParentComponent`（元素级引用），
+    // 不依赖 app._instance（3.141.1 上它为 null，导致 walkCount=0、遍历全空）。
+    // 从元素拿到实例后沿 .parent 链向上补扫，覆盖 setupState / ctx 两种存放位置。
+    // 若写字板在 iframe 内，则递归进各 iframe 的 contentDocument。
+    const scanDomForPad = () => {
+        const visitDoc = (doc, tag) => {
+            if (!doc || hitSeen) return;
+            let els = [];
+            try { els = doc.querySelectorAll('*'); } catch (_) { return; }
+            const cap = Math.min(els.length, 6000);
+            for (let i = 0; i < cap; i++) {
+                const el = els[i];
+                const inst = el.__vueParentComponent || (el.__vnode && el.__vnode.component) || null;
+                if (!inst) continue;
+                let cur = inst, d = 0;
+                while (cur && d < 40 && !hitSeen) {
+                    scanInstance(cur, d);
+                    cur = cur.parent;
+                    d++;
+                }
+                if (hitSeen) { status.domScanVia = tag; return; }
+            }
+            let iframes = [];
+            try { iframes = doc.querySelectorAll('iframe'); } catch (_) { }
+            for (let i = 0; i < iframes.length && i < 20; i++) {
+                let sub = null;
+                try { sub = iframes[i].contentDocument; } catch (_) { continue; }
+                if (sub) visitDoc(sub, tag + '/iframe' + i);
+                if (hitSeen) return;
+            }
+        };
+        visitDoc(document, 'main');
+    };
     const collect = () => {
+        // A) 先走 DOM 组件实例扫描（最稳，不依赖 app._instance）
+        scanDomForPad();
+        status.walk = walkLog.slice(0, 40);
+        status.walkCount = walkLog.length;
+        if (hitSeen) { status.piniaFound = 1; return hitSeen; }
+        // B) 退回遍历 Vue app 树
         const found = findVueApp();
         status.vueAppVia = found ? found.via : 'none';
         if (!found) return null;
@@ -222,7 +264,7 @@ internal object SimianV2PkAutomation {
             try { v = provides[k]; } catch (_) { continue; }
             const pad = unref(v && v.pad);
             const cfg = unref(v && v.recognizeConfig);
-            if (isPad(pad) && isLive(cfg)) { status.piniaFound = 1; return { source: 'vue-provides', pad: pad, config: cfg }; }
+            if (isPad(pad)) { status.piniaFound = 1; return { source: 'vue-provides', pad: pad, config: cfg || {} }; }
         }
         status.piniaFound = 0;
         return null;
@@ -250,8 +292,10 @@ internal object SimianV2PkAutomation {
     const groupsFromPoints = () => [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, dotSize: 0, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
     const commit = found => {
         status.source = found.source;
-        status.keypointId = found.config.keypointId;
-        status.expectedResult = found.config.answers;
+        const cfg = found.config || {};
+        status.keypointId = cfg.keypointId;
+        status.expectedResult = cfg.answers;
+        status.configLive = !!cfg.keypointId;
         const pad = found.pad;
         status.status = 'injecting-data';
         // 优先走画板自身的数据注入 API：fromData 会把点集正规化为贝塞尔段并真正画到 canvas，
