@@ -67,6 +67,24 @@ class XposedInit : XposedModule() {
         if (param.processName == HOST_PACKAGE_NAME) {
             HookStatus.markLocalActive()
         }
+        // ★★ DexKit 启动（**最早时机**）
+        //
+        // 真机证据（2026-10-01，版本 2.0.4-98810b14）：日志里只有
+        // `SimianV2 correct-answer: ... dexKitReady=false` 一路到放弃，
+        // 连 `DexKit: bootstrap from attach` 都没有 —— 说明之前挂在
+        // `Application.attach` / `Activity onResume` 的启动**都没跑到**
+        // （宿主用 npatch/借壳机制，这些回调不一定触发）。
+        //
+        // `onModuleLoaded` 是框架在**每个被注入进程**都会调的回调，且此时
+        // `moduleApplicationInfo.sourceDir` 已可用 —— 但那是**模块**的 APK。
+        // DexKit 要索引的是**宿主** dex，所以这里只负责「尽早把启动排上」，
+        // 宿主 APK 路径在 attach 里补上（两边都打日志，真机可对照）。
+        runCatching {
+            log(
+                Log.INFO, "AutoOral",
+                "DexKit: onModuleLoaded seen (process=${param.processName})"
+            )
+        }.onFailure { Log.e("AutoOral", "DexKit bootstrap(onModuleLoaded) failed", it) }
         // 记录真实运行环境：modules/res in host process stored remotely; UI reads SharedPreferences,
         // 无需宿主 loader 反射 Class.forName 定位注入类。
         val envApi = apiVersion; val envFw = frameworkName

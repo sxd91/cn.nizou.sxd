@@ -109,11 +109,30 @@ fun String.kotlinStrokes(): List<Array<PointF>> {
     }
 }
 
+/**
+ * 带 seed 的纯 Kotlin 笔画（**每题起点/抖动不同**）。
+ *
+ * 服务端会比对多题笔迹是否完全雷同（雷同判定为机器作答）。pk-node 的
+ * `strokes.buildPathPoints(answer, idx + 1, 'ARC')` 就是「按题号换 seed」，
+ * 这里对齐同样语义：seed 只影响起点与手抖相位，不影响「长得像人手写」这一点。
+ */
+fun String.kotlinStrokesAt(seed: Int): List<Array<PointF>> {
+    if (isEmpty()) return listOf(buildDenseStroke(40.0 + seed * 3.0, 30.0 + seed * 2.0, seed = seed))
+    return mapIndexed { idx, _ ->
+        buildDenseStroke(
+            x0 = 40.0 + idx * 26.0 + (seed % 7) * 3.0,
+            y0 = 30.0 + (idx % 2) * 3.0 + (seed % 5) * 2.0,
+            seed = seed + idx,
+        )
+    }
+}
+
 /** 一条密集连续线段（24 点，带手抖摆动），坐标与 native 版同量级（数十 px）。 */
-private fun buildDenseStroke(x0: Double, y0: Double, n: Int = 24): Array<PointF> {
+private fun buildDenseStroke(x0: Double, y0: Double, n: Int = 24, seed: Int = 0): Array<PointF> {
+    val phase = (seed % 11) * 0.37
     return Array(n) { i ->
         val t = i.toDouble() / (n - 1)
-        val x = x0 + kotlin.math.sin(t * Math.PI) * 2.0 + (if (i % 2 == 0) 0.4 else -0.4)
+        val x = x0 + kotlin.math.sin(t * Math.PI + phase) * 2.0 + (if (i % 2 == 0) 0.4 else -0.4)
         val y = y0 + t * 60.0
         PointF(x.toFloat(), y.toFloat())
     }

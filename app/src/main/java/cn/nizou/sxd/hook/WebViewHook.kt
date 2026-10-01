@@ -103,7 +103,7 @@ class WebViewHook(
                 return@post
             }
             runCatching {
-                eval.invoke(webView, erudaJs, null)
+                eval.invoke(webView, erudaJs, makeValueCallback(eval) { })
             }.onFailure { logI("injectEruda script failed: ${it.message}") }
 
             // 脚本注入是异步的：稍后再调 init 并回报结果。
@@ -115,7 +115,9 @@ class WebViewHook(
                         "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}" +
                         "return 'inited';})()}catch(e){return 'error:'+(e&&e.message)}"
                 runCatching {
-                    eval.invoke(webView, initScript, android.webkit.ValueCallback<String> { result ->
+                    // ★ 回调必须按方法签名动态构造（X5 用的是自己的 ValueCallback，
+                    //   不是系统 android.webkit.ValueCallback —— 真机已实测报错）。
+                    eval.invoke(webView, initScript, makeValueCallback(eval) { result ->
                         logI("eruda init result: $result")
                     })
                 }.onFailure { logI("injectEruda init failed: ${it.message}") }
@@ -137,6 +139,50 @@ class WebViewHook(
                 it.name == "evaluateJavascript" && it.parameterCount == 2 &&
                     it.parameterTypes[0] == String::class.java
             }?.also { it.isAccessible = true; evalMethodCache = it }
+        }.getOrNull()
+    }
+
+    /**
+     * 为第 2 个参数（`ValueCallback`）造一个**匹配该 WebView 实现**的代理。
+     *
+     * ## ★★ 真机踩坑（2026-10-01）
+     *
+     * ```
+     * injectEruda init failed: method com.tencent.smtt.sdk.WebView.evaluateJavascript
+     *   argument 2 has type com.tencent.smtt.sdk.ValueCallback, got q03
+     * ```
+     *
+     * X5 的 `evaluateJavascript(String, com.tencent.smtt.sdk.ValueCallback)` 要求的回调类型
+     * **不是**系统的 `android.webkit.ValueCallback`（两者无继承关系）→ 直接传系统回调会
+     * `IllegalArgumentException` → 整段注入失败（表现：「日志说 switch=true，但面板不出现」）。
+     *
+     * 所以这里**先解析方法签名里那个接口**，再用 `Proxy` 动态实现它，
+     * 让它同时兼容系统与 X5（以及将来别的 WebView 实现）。
+     *
+     * 注：X5 旧版本可能没有 `ValueCallback` 接口（第二个参数为 null 即可），
+     * 那种情况下返回 null，由调用方按「不要回调」处理。
+     */
+    private fun makeValueCallback(eval: Method, onResult: (String?) -> Unit): Any? {
+        val cbType = eval.parameterTypes.getOrNull(1) ?: return null
+        if (!cbType.isInterface) return null
+        return runCatching {
+            java.lang.reflect.Proxy.newProxyInstance(
+                cbType.classLoader,
+                arrayOf(cbType),
+            ) { _, method, args ->
+                when (method.name) {
+                    "onReceiveValue" -> {
+                        onResult(args?.firstOrNull() as? String)
+                        null
+                    }
+                    // ValueCallback 可能继承别的接口（如 onReceiveValue 之外的方法）：
+                    // 一律返回 null，不抛异常——注入流程不能被回调打乱。
+                    "toString" -> "AutoOralValueCallback"
+                    "hashCode" -> System.identityHashCode(this)
+                    "equals" -> false
+                    else -> null
+                }
+            }
         }.getOrNull()
     }
 

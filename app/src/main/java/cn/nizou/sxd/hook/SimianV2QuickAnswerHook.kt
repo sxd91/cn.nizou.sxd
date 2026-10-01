@@ -53,6 +53,23 @@ class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) :
     @Volatile private var attempts = 0
 
     override fun startHook() {
+        // ★★ 自己保证 DexKit 一定被启动。
+        //
+        // 真机证据（2026-10-01，2.0.4-98810b14）：日志里 `DexKit: bootstrap from attach`
+        // **一行都没有**，而 correct-answer 一路 `dexKitReady=false` 到放弃。
+        // 也就是说把启动放在 `Application.attach` / `Activity onResume` 里都**不可靠**
+        // （宿主走 npatch 借壳，这些回调不一定触发）。
+        //
+        // 这里直接**同步启动**：拿当前进程的 Application（`currentApplication()` 反射
+        // `ActivityThread.currentApplication`，在任何已注入进程都可用），
+        // 取其 `applicationInfo.sourceDir` —— 那就是宿主 APK 路径。
+        runCatching {
+            val app = cn.nizou.sxd.util.currentApplication()
+            val apkPath = app.applicationInfo?.sourceDir
+            logI("DexKit: bootstrap from QuickAnswerHook, apkPath=$apkPath")
+            if (apkPath != null) DexKitCoordinator.start(apkPath)
+        }.onFailure { logI("DexKit: bootstrap from QuickAnswerHook failed: ${it.message}") }
+
         // 不要只依赖 addReadyListener：DexKit 失败时它永不回调（旧版永久静默的根因）。
         // 这里直接启动自轮询，ready 回调只用来「提前触发一次」。
         DexKitCoordinator.addReadyListener { attemptInstall("ready-callback") }
