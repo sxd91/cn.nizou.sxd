@@ -1,0 +1,26 @@
+[package]
+name = "auto-oral-strokes"
+version = "1.0.0"
+edition = "2021"
+description = "老挂戏老叟（cn.nizou.sxd）笔迹生成 native 模块：把原先依赖第三方 AOC so 的 nativeStrokes 用 Rust 重写"
+license = "MIT"
+publish = false
+
+[lib]
+# cdylib => libauto_oral_strokes.so
+name = "auto_oral_strokes"
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI 绑定：只依赖官方 jni crate（极少依赖，CI 好构建）
+jni = { version = "0.21", default-features = false }
+
+[profile.release]
+# 体积优先（模块 APK 越小越好）
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+# ⚠️ 刻意**不设** panic = "abort"：
+# JNI 入口用 catch_unwind 兜住所有意外并返回 null（让 Kotlin 侧静默回落），
+# abort 会让 panic 直接杀进程、catch_unwind 失效 —— 对注入宿主进程的模块太危险。

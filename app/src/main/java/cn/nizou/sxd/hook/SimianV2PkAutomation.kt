@@ -203,19 +203,50 @@ internal object SimianV2PkAutomation {
     // ⚠️ 代价很高：真机 candidates=42，逐个 import 会产生大量 Promise。
     // 所以**结果缓存到 window.__aa_padCache**，重试时不再重复 import 全量候选
     // （否则重试会把页面 JS 线程打爆，SPA 自己退回主页 —— 真机已复现）。
-    const padFrom = (m, where) => {
-        if (!m) return null;
-        let store = null;
-        try { store = (typeof m.d === 'function') ? m.d() : (m.default || null); } catch (e) { return null; }
-        if (!store) return null;
-        const pad = unref(store.pad);
-        if (isPad(pad)) { status.via = where; return pad; }
-        return null;
+    /**
+     * 取模块导出的 store 对象集合。
+     *
+     * ## ★★ 2026-10-01 真因：导出名不是 `d`
+     *
+     * SimianV2 写死了 `module.d?.()` **和** `index-legacy.DMgv2yXx.js` 这个 hash。
+     * 官方每次发版 hash 与导出名都会变 —— **本机这一版的导出名是 `b`**，真机取证
+     * （`/root/work/pkassets2/useRecognizeBoard-legacy.D1CLb53q.js` 尾部原文）：
+     *
+     * ```js
+     * e("b", () => ({ pad: I, writeContent: G, recognizeConfig: Q, onRecognize: J,
+     *                 performanceTimestamp: q, initWritingPad: $, disposeWritingPad: tt,
+     *                 resetCanvas: lt, resetServerCanvas: et, setOnRecognize: xt }))
+     * ```
+     *
+     * 写死 `d` → store 恒为 null → 42 个候选逐个 import 全部拿不到 pad
+     * （真机 `{"status":"finding-pad","candidates":42}`），叠加重试就是 Promise 洪水，
+     * 把 PK 答题页的 JS 线程打爆 → SPA 自己退回 `pk.html` 主页。
+     *
+     * 所以这里**不写死任何导出名**：遍历模块的全部导出，函数就地调用、对象直接用，
+     * 谁返回含 `pad` 的 store 就用谁（官方再改导出名也不会失效）。
+     */
+    const storesOf = m => {
+        const out = [];
+        if (!m || typeof m !== 'object') return out;
+        for (const k of Object.getOwnPropertyNames(m)) {
+            let v;
+            try { v = m[k]; } catch (e) { continue; }
+            if (typeof v === 'function') {
+                // store 工厂（本机为 `b`，SimianV2 那版为 `d`，将来还可能是别的）
+                try { const s = v(); if (s && typeof s === 'object') out.push(s); } catch (e) {}
+            } else if (v && typeof v === 'object') {
+                out.push(v);
+            }
+        }
+        return out;
     };
-    /** 只取 store（不判 pad），供扫描阶段判断「这个模块有没有 pad 槽位」。 */
-    const inspect = m => {
-        if (!m) return null;
-        try { return (typeof m.d === 'function') ? m.d() : (m.default || null); } catch (e) { return null; }
+    /** 在模块里找画板：遍历所有 store，取第一个 pad 可判定的。 */
+    const padFrom = (m, where) => {
+        for (const store of storesOf(m)) {
+            const pad = unref(store.pad);
+            if (isPad(pad)) { status.via = where; return pad; }
+        }
+        return null;
     };
     const PAD_CACHE = window.__aa_padCache = window.__aa_padCache || {};
     const candidateUrls = () => {
@@ -247,33 +278,32 @@ internal object SimianV2PkAutomation {
      *     （模块清单在同一页面生命周期内是静态的，重复扫没有新信息）。
      */
     const tryImportRoute = async () => {
-        // 1) 只试记住的那个模块
+        // 1) 只试记住的那个模块（重试时只 import 1 个，不再全量扫描）
         if (PAD_CACHE.moduleUrl) {
             try {
                 const m = await System.import(PAD_CACHE.moduleUrl);
-                const store = inspect(m);
-                const pad = store ? unref(store.pad) : null;
-                if (isPad(pad)) { status.via = 'cache:' + PAD_CACHE.moduleUrl.split('/').pop(); return pad; }
+                const pad = padFrom(m, 'cache:' + PAD_CACHE.moduleUrl.split('/').pop());
+                if (pad) return pad;
             } catch (e) {}
             status.cacheMiss = true;
             return null;
         }
-        // 3) 已扫过且没结果 —— 不再重复扫描（避免 Promise 洪水打爆页面）
+        // 2) 已扫过且没结果 —— 不再重复扫描（避免 Promise 洪水打爆页面）
         if (PAD_CACHE.scanDone) { status.scanSkipped = true; return null; }
 
-        // 2) 全量扫描（每个页面生命周期只做一次）
+        // 3) 全量扫描（每个页面生命周期只做一次）
         const urls = candidateUrls();
         status.candidates = urls.length;
         PAD_CACHE.scanDone = true;
         for (const u of urls) {
-            try {
-                const store = inspect(await System.import(u));
-                if (!store) continue;
-                const pad = unref(store.pad);
-                if (isPad(pad)) { PAD_CACHE.moduleUrl = u; status.via = 'import:' + u.split('/').pop(); return pad; }
-                // 记下「有 pad 槽位」的模块：画板可能稍后才填进这个 ref，重试时优先它。
-                if ('pad' in store) PAD_CACHE.moduleUrl = u;
-            } catch (e) {}
+            let m = null;
+            try { m = await System.import(u); } catch (e) { continue; }
+            const pad = padFrom(m, 'import:' + u.split('/').pop());
+            if (pad) { PAD_CACHE.moduleUrl = u; return pad; }
+            // 记下「有 pad 槽位」的模块：画板可能稍后才填进这个 ref，重试时优先它。
+            for (const store of storesOf(m)) {
+                if ('pad' in store) { PAD_CACHE.moduleUrl = u; break; }
+            }
         }
         return null;
     };

@@ -1,6 +1,7 @@
 package cn.nizou.sxd.api
 
 import cn.nizou.sxd.util.XposedHelpers
+import cn.nizou.sxd.util.logI
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 
@@ -46,7 +47,7 @@ object LegacyApiService {
             ::coroutineContext.isInitialized &&
             ::coroutineClass.isInitialized
 
-    fun postSavedExp(exp: Int, onResult: (Result<Any>) -> Unit) {
+    fun postSavedExp(exp: Int, ruleType: Int, onResult: (Result<Any>) -> Unit) {
         val postSavedExp = Proxy.newProxyInstance(
             coroutineClass.classLoader,
             arrayOf(coroutineClass),
@@ -58,6 +59,10 @@ object LegacyApiService {
         val exercise = exercises.first()
         XposedHelpers.setLongField(exercise, "finishTime", System.currentTimeMillis())
         XposedHelpers.setIntField(exercise, "obtainExp", exp)
+        // ★★ 2026-10-01：原来**从未设置 ruleType**（老挂/pk-node 都设了）。
+        //   服务端按 ruleType 记账/去重，缺字段时行为不可预期 —— 与参考实现对齐。
+        runCatching { XposedHelpers.setIntField(exercise, "ruleType", ruleType) }
+            .onFailure { logI("set ruleType failed: ${it.message}") }
         postSavedExpMethod.invoke(apiService, body, postSavedExp)
     }
 

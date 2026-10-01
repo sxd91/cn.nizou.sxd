@@ -102,27 +102,63 @@ class WebViewHook(
                 logI("injectEruda: evaluateJavascript not found on ${webView.javaClass.name}")
                 return@post
             }
+            logI("injectEruda: 开始注入 eruda.js（${erudaJs.length} chars）")
             runCatching {
                 eval.invoke(webView, erudaJs, makeValueCallback(eval) { })
             }.onFailure { logI("injectEruda script failed: ${it.message}") }
 
             // 脚本注入是异步的：稍后再调 init 并回报结果。
             webView.postDelayed({
+                // ★★ 2026-10-01 真 bug（上一版）：外层 `try{...}` **没有 return**，
+                //   内层 IIFE 的返回值被丢弃 → 整个表达式为 `undefined` →
+                //   回调拿到 `null`。于是日志里那句 `eruda init result: null` 是**假信号**：
+                //   它既不代表成功也不代表失败，只是「返回值丢了」。
+                //   现在把 IIFE 的结果显式 `return` 出来，并区分 4 种状态。
                 val initScript =
-                    "try{(function(){if(!window.eruda)return 'no-eruda';" +
-                        "if(window.eruda._isInit)return 'already';" +
-                        "eruda.init({useShadowDom:true,defaultPanel:'console'});" +
+                    "try{return (function(){" +
+                        "if(!window.eruda)return 'no-eruda';" +
+                        "if(!window.eruda._isInit){eruda.init({useShadowDom:false,defaultPanel:'console'});}" +
                         "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}" +
-                        "return 'inited';})()}catch(e){return 'error:'+(e&&e.message)}"
+                        "try{eruda.show();}catch(e){}" +
+                        "return 'ok';})()}catch(e){return 'error:'+(e&&e.message)}"
                 runCatching {
                     // ★ 回调必须按方法签名动态构造（X5 用的是自己的 ValueCallback，
                     //   不是系统 android.webkit.ValueCallback —— 真机已实测报错）。
                     eval.invoke(webView, initScript, makeValueCallback(eval) { result ->
                         logI("eruda init result: $result")
+                        if (result != null && result.contains("ok")) {
+                            // 注入后让页面自己回报一行（走宿主 console 通道，我们能看到）。
+                            // 老挂（cn.apixiaoyuan.app）就是这么确认「面板真的挂上了」的。
+                            runCatching {
+                                eval.invoke(
+                                    webView,
+                                    "try{console.log('[老挂戏老叟] Eruda 已注入');}catch(e){}",
+                                    makeValueCallback(eval) { }
+                                )
+                            }
+                        }
                     })
                 }.onFailure { logI("injectEruda init failed: ${it.message}") }
-            }, 300L)
+            }, 800L)
         }
+    }
+
+    /**
+     * 在**页面加载完成**（`loadUrl` 被调后的一小段窗口）之外，再用 @JavascriptInterface
+     * 探活一次 eruda 面板是否存在 —— 真机「看不到面板」时用它区分「没注入成功」与
+     * 「注入了但被页面 SPA 切页卸载」。
+     */
+    private fun probeEruda(webView: View) {
+        val eval = findEvaluateJavascript(webView) ?: return
+        webView.postDelayed({
+            runCatching {
+                eval.invoke(
+                    webView,
+                    "String(!!(window.eruda && window.eruda._isInit))",
+                    makeValueCallback(eval) { r -> logI("eruda probe: _isInit=$r") }
+                )
+            }
+        }, 2500L)
     }
 
     /**
@@ -377,7 +413,11 @@ class WebViewHook(
                 // 所以这里**无论开没开都打一行日志**，真机可直接确认「是开关没开」还是「注入了但失败」。
                 val erudaOn = PK.h5DebugConsole
                 logI("SimianV2 eruda: switch=$erudaOn (prefs key=${moduleStringRes.KEY_H5_DEBUG_CONSOLE})")
-                if (erudaOn) injectEruda(loadUrl, webView)
+                if (erudaOn) {
+                    injectEruda(loadUrl, webView)
+                    // ★ 探活：真机「看不到面板」时用它区分「没注入」与「被 SPA 切页卸载」。
+                    probeEruda(webView)
+                }
                 val mode = PK.mode
                 // 答题 JS 配置（mode/自定义答案/自定义正确题数），quick.js 读取；标准模式同样注入。
                 injectAaConfig(loadUrl, webView)

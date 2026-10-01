@@ -12,6 +12,22 @@ import java.util.zip.ZipFile
 /**
  * native libauto_oral 加载（笔迹识别）。
  *
+ * ## ★★ 2026-10-01：改为加载**本模块自己的 Rust 库**
+ *
+ * 原来加载的是 `jniLibs/` 里那个**第三方** `libauto_oral.so`（AOC/TinyHai 编）。
+ * 用 `readelf -d --dyn-syms` 实测：它对外**只导出 `JNI_OnLoad`**，
+ * 内部用 `RegisterNatives` 注册到**它自己的类名**下 ——
+ * 本模块调用 `nativeStrokes` 必然 `UnsatisfiedLinkError`，
+ * 于是永远退回纯 Kotlin 兜底（真机日志里那句 `strokes disabled`）。
+ *
+ * 现在换成 `rust/` crate 编出来的 **`libauto_oral_strokes.so`**，
+ * 它导出的正是本模块需要的
+ * `Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes`。
+ *
+ * 加载顺序：
+ *  1. 模块 APK 里解压出来的 `libauto_oral_strokes.so`（CI 产出 / 打包进 jniLibs）；
+ *  2. 兼容旧名 `libauto_oral.so`（万一还在用旧包）。
+ *
  * **延迟加载**：System.load 与 Xposed 框架（尤其 LSPosed standard）的 native 加载窗口冲突会
  * 直接 abort 进程（JNI 错误无法用 runCatching 捕获）。因此不在启动/attach 时加载，而是在
  * 首次真正使用笔迹功能时才加载，避开框架初始化窗口；加载失败仅影响笔迹，不影响其它功能。
@@ -19,6 +35,12 @@ import java.util.zip.ZipFile
 private val nativeLoaded = AtomicBoolean(false)
 
 private val loadAttempted = AtomicBoolean(false)
+
+/** 我们自己的 Rust 库文件名（`rust/Cargo.toml` 的 `[lib] name`）。 */
+private const val NATIVE_LIB_NAME = "libauto_oral_strokes.so"
+
+/** 历史第三方库名（仅作兜底尝试）。 */
+private const val LEGACY_LIB_NAME = "libauto_oral.so"
 
 /**
  * 3.140 适配（2026-08-29）：
@@ -36,29 +58,31 @@ private fun ensureNativeLoaded(): Boolean {
         loadAttempted.set(true)
         return try {
             val self = XposedInit.self
-            var path: String? = File(self.moduleApplicationInfo.nativeLibraryDir, "libauto_oral.so")
+            // 1) 已解压到 nativeLibraryDir 的（extractNativeLibs=true 时）
+            var path: String? = File(self.moduleApplicationInfo.nativeLibraryDir, NATIVE_LIB_NAME)
                 .takeIf { it.exists() }?.absolutePath
-            if (path == null) {
-                path = extractLibFromApk(self)?.absolutePath
-            }
+            // 2) 直接从模块 APK 解压（extractNativeLibs=false，AGP 默认）
+            if (path == null) path = extractLibFromApk(self, NATIVE_LIB_NAME)?.absolutePath
+            // 3) 兜底：历史第三方库名（老包还在用旧 so 时）
+            if (path == null) path = extractLibFromApk(self, LEGACY_LIB_NAME)?.absolutePath
             if (path != null) {
                 System.load(path)
                 nativeLoaded.set(true)
-                logI("libauto_oral loaded: " + path)
+                logI("native strokes lib loaded: $path")
                 true
             } else {
-                logI("libauto_oral not found (nativeLibraryDir empty), strokes disabled")
+                logI("native strokes lib not found (looked for $NATIVE_LIB_NAME), strokes fall back to Kotlin")
                 false
             }
         } catch (e: Throwable) {
-            logI("libauto_oral load failed: " + e.message)
+            logI("native strokes lib load failed: " + e.message)
             false
         }
     }
 }
 
-/** extractNativeLibs=false 时从模块 APK 解压 .so 到模块 filesDir。 */
-private fun extractLibFromApk(self: XposedModule): File? = runCatching {
+/** extractNativeLibs=false 时从模块 APK 解压指定 .so 到模块 filesDir。 */
+private fun extractLibFromApk(self: XposedModule, libName: String): File? = runCatching {
     val apkFile = File(self.moduleApplicationInfo.sourceDir)
     val abi = self.moduleApplicationInfo.nativeLibraryDir
         .split(File.separator).lastOrNull()
@@ -67,15 +91,15 @@ private fun extractLibFromApk(self: XposedModule): File? = runCatching {
         ?: "arm64-v8a"
     val zip = ZipFile(apkFile)
     try {
-        val entry = zip.getEntry("lib/" + abi + "/libauto_oral.so")
-            ?: zip.getEntry("lib/arm64-v8a/libauto_oral.so")
+        val entry = zip.getEntry("lib/" + abi + "/" + libName)
+            ?: zip.getEntry("lib/arm64-v8a/" + libName)
             ?: return null
         val dir = File(self.moduleApplicationInfo.dataDir, "files/lib").apply { mkdirs() }
-        val out = File(dir, "libauto_oral.so")
+        val out = File(dir, libName)
         zip.getInputStream(entry).use { input ->
             out.outputStream().use { it.write(input.readBytes()) }
         }
-        logI("libauto_oral extracted from APK to " + out)
+        logI("$libName extracted from APK to $out")
         out
     } finally {
         runCatching { zip.close() }

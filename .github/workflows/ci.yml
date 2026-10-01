@@ -1,5 +1,4 @@
 name: CI
-
 on:
   push:
     branches:
@@ -20,18 +19,19 @@ on:
       - '.gitignore'
       - '.idea/**'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  # ---- Job 1: 代码质量门禁（独立、快速）----
-  lint-and-test:
-    name: Lint & Test
+  # ---- Job 0: Rust native（笔迹库）----
+  #
+  # ★ 2026-10-01：笔迹生成改为 **Rust 重写**（`rust/` crate），替代原来那个
+  #   「只导出 JNI_OnLoad、对本模块永远 UnsatisfiedLinkError」的第三方 so。
+  # 本 job 与 lint / build **并行**（rust 与 gradle 互不依赖），不拖长关键路径。
+  rust:
+    name: Rust Native (libauto_oral_strokes)
     runs-on: ubuntu-latest
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -39,23 +39,81 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Install cargo-ndk + locate NDK
+        run: |
+          set -euo pipefail
+          cargo install cargo-ndk --locked
+          # GitHub runner 预装 NDK，取版本最高的那个
+          NDK_DIR=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* 2>/dev/null | sort -V | tail -1)
+          test -n "$NDK_DIR" || { echo "ERROR: 未找到 Android NDK"; exit 1; }
+          echo "NDK=$NDK_DIR"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+      - name: Cargo test (host)
+        working-directory: rust
+        run: cargo test --quiet
+      - name: Build .so for arm64-v8a
+        working-directory: rust
+        run: cargo ndk -t arm64-v8a -o ../app/src/main/jniLibs build --release
+      - name: Verify JNI export exists
+        run: |
+          set -euo pipefail
+          SO=app/src/main/jniLibs/arm64-v8a/libauto_oral_strokes.so
+          test -f "$SO" || { echo "ERROR: 未产出 $SO"; exit 1; }
+          echo "size: $(stat -c%s "$SO") bytes"
+          # ★ 门禁：必须导出 Kotlin `external` 声明对应的那个符号，
+          #   否则运行时就是 UnsatisfiedLinkError（这正是我们要修的东西）。
+          readelf -d --dyn-syms "$SO" | grep -q 'Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes' \
+            || { echo "ERROR: 缺少 JNI 导出符号 Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes"; exit 1; }
+          echo "OK: JNI 导出符号存在"
+      - name: Upload rust lib
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-jniLibs
+          path: app/src/main/jniLibs/arm64-v8a/libauto_oral_strokes.so
+          if-no-files-found: error
 
+  # ---- Job 1: 代码质量门禁 ----
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    needs: rust
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, '[skip ci]')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
           cache: gradle
-
       - name: Grant execute permission
         run: chmod +x gradlew
-
+      # ★ 单测需要 jniLibs 里的 native（笔迹测试会用到），从 rust job 取。
+      - name: Download rust native lib
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-jniLibs
+          path: app/src/main/jniLibs/arm64-v8a/
       - name: Lint
         run: ./gradlew lint --no-daemon
-
       - name: Unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
-
       - name: Upload lint report
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,27 +122,35 @@ jobs:
           path: app/build/reports/lint-results-debug.html
           if-no-files-found: warn
 
-  # ---- Job 2: 未签名 Release 构建（PR/手动预览用）----
-  # 版本策略（2026-08-30 用户要求）：CI **不**改版本号 —— 构建直接用 version.properties
+  # ---- Job 2: 未签名 Release 构建 ----
+  #
+  # ★ 2026-10-01 关键改动：**不再 `needs: lint-and-test`**。
+  #   原来 build 必须等 lint+test 跑完才开始 → 总时长 = lint + test + build（串行）。
+  #   现在 build / lint / rust 三者并发 → 总时长 ≈ max(三者)。
+  #   「lint 挂了就别要 APK」的门禁仍然成立：lint 是独立 job，它红了整条流水线就是红的。
+  #
+  # 版本策略（2026-08-30 用户要求）：CI **不**改版本号 —— 直接用 version.properties
   # 当前版本；版本号只在 release 工作流（release.yml）发布时 +1 并提交（失败不提交）。
   build:
     name: Build (unsigned)
-    needs: lint-and-test
+    needs: rust
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
           cache: gradle
-
+      - name: Download rust native lib
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-jniLibs
+          path: app/src/main/jniLibs/arm64-v8a/
       - name: Grant execute permission
         run: chmod +x gradlew
-
       # 未签名构建：CI 无 keystore，signingConfig 回退到 debug 签名（见 app/build.gradle.kts）。
       # 版本号直接用 version.properties 当前值（-P 显式传入，保持与 release 行为一致）。
       - name: Build release (unsigned)
@@ -105,6 +171,9 @@ jobs:
             echo "::group::$apk"
             echo "ABIs:"
             unzip -Z1 "$apk" 'lib/*/*.so' | cut -d/ -f2 | sort -u
+            # ★ 门禁：笔迹 native 库必须在包里（它是 Rust 重构的产物）
+            unzip -Z1 "$apk" | grep -q 'lib/arm64-v8a/libauto_oral_strokes.so' \
+              || { echo "ERROR: APK 内缺少 libauto_oral_strokes.so"; exit 1; }
             echo "::endgroup::"
             cp -v "$apk" dist/apk/
           done
