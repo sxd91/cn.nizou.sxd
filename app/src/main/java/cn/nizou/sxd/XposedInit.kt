@@ -114,6 +114,16 @@ class XposedInit : XposedModule() {
             hookExecutable("app_attach", attach).intercept { chain ->
                 val r = chain.proceed()
                 try {
+                    // ★★ 最先做：禁止 npatch「内置」（把模块编译进宿主 APK）。
+                    // 判据 = 外层 manifest 的 appComponentFactory 被 npatch 的
+                    // `top.nkbe.npatch.metaloader.LSPAppComponentFactoryStub` 占用（真机取证）。
+                    // 命中即中止宿主；只允许 npatch 注入模式运行。默认开（Common.blockNPatchEmbed）。
+                    runCatching {
+                        val hostApp = chain.thisObject as? android.app.Application
+                        if (cn.nizou.sxd.util.NPatchGuard.enforceOrKill(hostApp)) {
+                            return@intercept r
+                        }
+                    }.onFailure { Log.e("AutoOral", "NPatchGuard check failed", it) }
                     BaseHook.startHook(this, appClassLoader)
                     // （sign 白盒/native 探针已移除：native inline hook（shadowhook 挂
                     //  libRequestEncoder.so）实测会把宿主搞崩（MMKV UnsatisfiedLinkError / SIGSEGV），

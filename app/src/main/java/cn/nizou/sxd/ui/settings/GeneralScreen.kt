@@ -54,6 +54,15 @@ fun GeneralScreen(res: StringRes, onBack: () -> Unit) {
                         SettingsPrefs.writeBoolean(res, res.KEY_IGNORE_NICKNAME_RESTRICTION, it)
                     }
                 )
+                // 禁止 npatch 内置：强制开启，不可关闭（无开关，仅说明）
+                SwitchWidget(
+                    title = "禁止 npatch 内置（强制）",
+                    description = "只允许 npatch 注入/修补。检测到宿主是 npatch「内置版」（manifest 里被声明成 " +
+                        "xposed 模块 xposedmodule=true，或宿主 APK 内带 assets/npatch/modules/ 下的模块 apk）时，" +
+                        "直接中止宿主进程。该功能强制开启，无法关闭。",
+                    checked = true,
+                    onCheckedChange = { /* 强制开启，忽略任何改动 */ },
+                )
             }
         }
         item {

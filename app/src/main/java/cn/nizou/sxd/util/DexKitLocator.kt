@@ -28,6 +28,9 @@ object DexKitLocator {
     @Volatile
     private var bridge: DexKitBridge? = null
 
+    /** DexKit 是否已就绪（bridge 已建）。调用方可据此判断「没命中」还是「没就绪」。 */
+    fun isReady(): Boolean = bridge != null
+
     /** 用宿主 APK 路径初始化（幂等；线程安全）。失败返回 false 不抛。 */
     fun init(apkPath: String): Boolean {
         if (bridge != null) return true
@@ -36,6 +39,7 @@ object DexKitLocator {
             System.loadLibrary("dexkit")
             val b = DexKitBridge.create(apkPath) ?: return false
             bridge = b
+            logI("DexKitLocator: bridge created for $apkPath")
             true
         }.onFailure {
             logI("DexKitLocator init failed: ${it.message}")

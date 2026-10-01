@@ -62,6 +62,18 @@ object Common {
     // 默认开：昵称长度（GBK 字节 ≤16）与字符/格式限制全部放开。
     val ignoreNicknameRestriction
         get() = modulePrefs.getBoolean(moduleStringRes.KEY_IGNORE_NICKNAME_RESTRICTION, true)
+
+    /**
+     * 禁止 npatch「内置」（把模块编译进宿主 APK）。
+     *
+     * **强制开启，不可关闭**：模块只允许在 npatch **注入/修补**模式下运行；
+     * 检测到宿主是 npatch 内置包时立即中止宿主进程（见 [cn.nizou.sxd.util.NPatchGuard]）。
+     *
+     * 这里**恒返回 true**，不再读 prefs —— 避免用户（或旧版配置）把它关掉。
+     */
+    @Suppress("unused")
+    val blockNPatchEmbed: Boolean
+        get() = true
 }
 
 object Practice {

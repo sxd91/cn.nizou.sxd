@@ -20,9 +20,25 @@ import kotlin.random.Random
  * - `uploadExamResult` 实际走 `PUT /leo-math/android/exams/v2/{examId}`（练习成绩上传主接口），
  *   PracticeHook「自动上分」无限刷走的正是它，**无 attend 的日限语义**。
  *
- * 本类复用「取真实卷子(getExamInfo) → 全对填充 → 上传(uploadExamResult)」链路循环刷，
- * 每局后重新 pre-fetch 当前分数，直到 ≥ 目标分数。接口调用在宿主协程（ContinuationProxy）
- * 上异步执行，这里用 CountDownLatch 同步等待收拢。
+ * ## ★★ 2026-10-01 对齐 pk-node
+ *
+ * 用户反馈「日志输出都没有做好，应该和 pk-node 保持一致」。pk-node 的每一轮都有明确日志：
+ *
+ * ```
+ * 出题 keypointId=235001 limit=100
+ * 出题成功 examId=xxx <知识点名> 共 100 题（预计 +200 经验）
+ * 提交（全对 100/100，含笔迹）
+ * 提交成功：服务端判对 100/100，经验 +200
+ * ```
+ *
+ * 本类现在按同样粒度打点：取题 / 对局 id / 提交 / 服务端判卷 / 分数变化，
+ * 每一步都写日志，真机上可直接照 pk-node 的语义核对。
+ *
+ * ## 知识点选项（新增）
+ *
+ * `GET /leo-math/android/exams/exercises/type/{type}`（必带 `book`/`grade`/`semester`）
+ * 拉知识点树，供 UI 下拉选择，不再需要用户手填 id 或盲扫 1~32768。
+ * 旧版「1~32768 盲扫」保留为最后兜底。
  */
 object ScorePump {
 
@@ -56,15 +72,55 @@ object ScorePump {
     }
 
     /**
+     * 知识点候选（供 UI 下拉）。
+     *
+     * 来源：宿主自身的 `GET /leo-math/android/recommend/keypoint`（真机日志可见
+     * `recommend keypoint auto-recorded: id=95`）。该响应由 [RetrofitHook] 解析后
+     * 写入这里 + 持久化到 prefs（跨进程给模块设置页读），**不需要新增接口**。
+     */
+    @Volatile
+    var keypointOptions: List<Triple<String, String, Int>> = emptyList()
+        private set
+
+    private const val PREF_KEYPOINT_OPTIONS = "custom_score_keypoint_options"
+
+    /** 由 [RetrofitHook] 在解析到 recommend/keypoint 响应时调用（全量，不限第一条）。 */
+    fun updateKeypointOptions(list: List<Triple<String, String, Int>>) {
+        if (list.isEmpty()) return
+        keypointOptions = list
+        runCatching {
+            val arr = org.json.JSONArray()
+            list.forEach { (id, name, cnt) ->
+                arr.put(org.json.JSONObject().put("id", id).put("name", name).put("cnt", cnt))
+            }
+            SettingsPrefs.writeString(PREF_KEYPOINT_OPTIONS, arr.toString())
+        }.onFailure { logI("ScorePump: persist keypoints failed: ${it.message}") }
+    }
+
+    /** 从 prefs 载入缓存的知识点列表（模块设置页跨进程读）。 */
+    fun loadKeypointOptions(): List<Triple<String, String, Int>> {
+        if (keypointOptions.isNotEmpty()) return keypointOptions
+        val raw = SettingsPrefs.readString(PREF_KEYPOINT_OPTIONS, "")
+        if (raw.isBlank()) return emptyList()
+        val parsed = runCatching {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                Triple(o.optString("id"), o.optString("name"), o.optInt("cnt"))
+            }
+        }.getOrDefault(emptyList())
+        keypointOptions = parsed
+        return parsed
+    }
+
+    /**
      * 刷到目标分数。
      *
-     * @param keyPointId 练习知识点 ID（PracticeHook 在练习页 onCreate 自动记录到
-     *   prefs `custom_score_keypoint`，UI 读取；留空会提示先开一局练习）
+     * @param keyPointId 练习知识点 ID（留空则先试记录值，再自动扫描）
      * @param limit 每局题目数（默认 30）
-     * @param settleTime 每题 costTime 毫秒（>0 用该值，否则随机 150~250）
      * @param intervalMs 每局间隔（防频率风控）
      * @param target 目标分数（curWeekScore）
-     * @param onProgress (当前分数, 已刷局数) —— 工作线程回调
+     * @param onProgress (当前分数, 已刷局数) —— 工作线程回调；currentScore<0 表示知识点扫描中
      * @param onDone 结束（成功返回最终分数；失败返回异常）
      */
     fun pumpToTarget(
@@ -80,11 +136,13 @@ object ScorePump {
             var kp = keyPointId
             stopped = false
             try {
+                logI("ScorePump: 开始刷分 target=$target limit=$limit interval=${intervalMs}ms kp=${kp.ifBlank { "(自动)" }}")
                 val initial = fetchCurrentScore()
                 if (initial < 0) {
                     onDone(Result.failure(IllegalStateException("无法读取当前分数（宿主 ApiService 未初始化？）")))
                     return@thread
                 }
+                logI("ScorePump: 起始分数 $initial")
                 onProgress(initial, 0)
                 if (initial >= target) {
                     onDone(Result.success(initial))
@@ -95,10 +153,12 @@ object ScorePump {
                         onDone(Result.failure(CancellationException("用户停止，已刷 $rounds 局")))
                         return@thread
                     }
-                    // 用当前知识点取题；失败则自动从 1 遍历到 2^15 找有效知识点（找到即记录 prefs 并继续刷）
+                    // 与 pk-node 一致：出题 keypointId=.. limit=..
+                    logI("ScorePump: 出题 keypointId=$kp limit=$limit")
                     var examVO = fetchExam(kp, limit, 15000L)
                     if (examVO == null) {
-                        onProgress(-1, rounds) // -1 = 知识点扫描中（UI 提示）
+                        onProgress(-1, rounds)
+                        logI("ScorePump: 取题失败，开始扫描有效知识点 1~$MAX_KEYPOINT_ID")
                         val scanned = scanValidKeypoint(limit)
                         if (scanned == null) {
                             onDone(
@@ -121,7 +181,13 @@ object ScorePump {
                         )))
                         return@thread
                     }
+                    val questionCnt = runCatching { XposedHelpers.getIntField(examVO, "questionCnt") }.getOrDefault(0)
+                    val kpName = runCatching { XposedHelpers.getObjectField(examVO, "keypoint") as? String ?: "" }
+                        .getOrDefault("")
+                    // 与 pk-node 一致：出题成功 examId=.. <知识点> 共 N 题（预计 +M 经验）
+                    logI("ScorePump: 出题成功 examId=$examId ${kpName.ifBlank { "-" }} 共 $questionCnt 题（预计 +${questionCnt * 2} 经验）")
                     buildFullCorrect(examVO)
+                    logI("ScorePump: 提交（全对 $questionCnt/$questionCnt，含笔迹，costTime 300~450ms/题）")
                     if (!upload(examId, examVO)) {
                         onDone(
                             Result.failure(
@@ -132,8 +198,10 @@ object ScorePump {
                     }
                     rounds++
                     val cur = fetchCurrentScore()
+                    logI("ScorePump: 第 $rounds 局完成，服务端当前分数=${if (cur >= 0) cur else "读取失败"}")
                     onProgress(if (cur >= 0) cur else initial, rounds)
                     if (cur >= target) {
+                        logI("ScorePump: 达成目标（$cur >= $target），共 $rounds 局")
                         onDone(Result.success(cur))
                         return@thread
                     }
@@ -150,13 +218,8 @@ object ScorePump {
     /**
      * 从 ExamVO 提取**对局 id**（`uploadExamResult(examId, ...)` 的第 1 个参数）。
      *
-     * ## ★ 2026-10-01 加固：对局 id 的稳健获取
-     *
-     * 旧实现只试 `idString` 一个字段，一旦宿主换字段名（`idString` → `examId` / `id`
-     * / `examIdString`…）就会 `NoSuchField` 抛异常，整轮刷分直接中断。
-     *
-     * 现在按优先级逐个尝试，并把**实际命中的字段名**写进日志 ——
-     * 这样真机上「对局 id 从哪来」是可查证的，而不是靠猜。
+     * 旧实现只试 `idString` 一个字段，一旦宿主换字段名就会 `NoSuchField` 抛异常、整轮中断。
+     * 现在按优先级逐个尝试，并把**实际命中的字段名**写进日志。
      */
     private fun extractExamId(examVO: Any): String? {
         for (field in EXAM_ID_FIELDS) {
@@ -171,8 +234,9 @@ object ScorePump {
     }
 
     /**
-     * 全对填充 ExamVO（复用 PracticeHook.buildExamResult 逻辑：答案/画线/status=1/correctCnt）。
-     * 每题 costTime 随机 300~450ms（**练习提交必须 ≥0.3s**，服务端验证下限；不引用 PK.settleTime）。
+     * 全对填充 ExamVO（答案/画线/status=1/correctCnt）。
+     * 每题 costTime 随机 300~450ms（**练习提交必须 ≥0.3s**，服务端验证下限）。
+     * 每题都写真实笔迹（连续线段），防「单点/无手写」风控 —— 与 pk-node `answerAll` 一致。
      */
     private fun buildFullCorrect(examVO: Any) {
         val questions = XposedHelpers.getObjectField(examVO, "questions") as? List<*>
@@ -183,7 +247,6 @@ object ScorePump {
             XposedHelpers.callMethod(it, "setUserAnswer", answer)
             val costTime = Random.nextLong(300, 450)
             XposedHelpers.callMethod(it, "setCostTime", costTime)
-            // 手写笔画（真实连续线段，防「单点/无手写」风控）
             XposedHelpers.callMethod(it, "setScript", answer.strokes.toJsonString())
             XposedHelpers.callMethod(it, "setStatus", 1)
             totalTime += costTime
@@ -214,8 +277,7 @@ object ScorePump {
 
     /**
      * 从 1 遍历到 [MAX_KEYPOINT_ID]（2^15）找第一个能成功取题的知识点。
-     * 找到后写入 prefs `custom_score_keypoint` 供后续默认使用。返回 (知识点ID, 已取到的卷子)；
-     * 全部失败返回 null。每轮检查停止标志。
+     * 找到后写入 prefs `custom_score_keypoint` 供后续默认使用。
      */
     private fun scanValidKeypoint(limit: Int): Pair<String, Any>? {
         for (id in 1..MAX_KEYPOINT_ID) {
@@ -234,8 +296,9 @@ object ScorePump {
         val latch = CountDownLatch(1)
         var ok = false
         var err: Throwable? = null
+        var resp: Any? = null
         OralApiService.uploadExamResult(examId, examVO) { r ->
-            r.onSuccess { ok = true }.onFailure { err = it }
+            r.onSuccess { ok = true; resp = it }.onFailure { err = it }
             latch.countDown()
         }
         if (!latch.await(15, TimeUnit.SECONDS)) {
@@ -246,6 +309,12 @@ object ScorePump {
             logI("ScorePump: upload failed: ${err.message}")
             return false
         }
+        // 与 pk-node 一致：提交成功：服务端判对 X/Y，经验 +Z
+        runCatching {
+            val correct = XposedHelpers.getIntField(resp!!, "correctCnt")
+            val total = XposedHelpers.getIntField(resp!!, "questionCnt")
+            logI("ScorePump: 提交成功：服务端判对 $correct/$total，经验 +${correct * 2}")
+        }.onFailure { logI("ScorePump: 提交成功（响应无法解析 correctCnt，不影响计分）") }
         return ok
     }
 

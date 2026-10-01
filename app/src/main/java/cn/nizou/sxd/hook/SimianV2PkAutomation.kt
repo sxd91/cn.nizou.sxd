@@ -10,37 +10,96 @@ import cn.nizou.sxd.util.logI
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Direct SimianV2 WebApi scheduling model with the actual 3.140 dynamic pad module. */
-/** Direct SimianV2 WebApi scheduling model. The pad instance comes from the live Vue/Pinia store. */
+/**
+ * SimianV2 页面自动化（笔画提交 / 结算页点击）。
+ *
+ * ## ★★ 2026-10-01 重写：按 SimianV2 原实现「抄」画板获取方式
+ *
+ * ### 为什么重写
+ *
+ * 上一版用「遍历 Vue 组件树找 setupState.pad」，真机实测**永远 finding-pad 失败**
+ * （`walk[0].stKeys=[]`、所有层 `hasPad=false`）—— 该页面是离线 SPA，
+ * 画板不是放在某个组件的 setupState 上，**扫树这条路根本不成立**。
+ *
+ * ### SimianV2（`com.log.simianv2`，设备实测可用）的真实做法
+ *
+ * 反编译 `classes.dex` 拿到的原文：
+ *
+ * ```js
+ * window.__strokeSubmitStatus = { status: 'loading-module', pointCount: points.length };
+ * System.import('https://leo.fbcontent.cn/bh5/leo-web-oral-pk/assets/index-legacy.DMgv2yXx.js')
+ *   .then(module => {
+ *       const store = module.d?.();
+ *       const pad = store?.pad?.value ?? store?.pad;
+ *       if (!pad) throw new Error('...');
+ *       pad._data = [{ points, penColor:'#000', minWidth:3, maxWidth:3,
+ *                      velocityFilterWeight:0.7, compositeOperation:'source-over' }];
+ *       pad.dispatchEvent(new CustomEvent('endStroke', { detail:{ synthetic:true } }));
+ *       window.__strokeSubmitStatus.status = 'submitted';
+ *   })
+ *   .catch(error => { window.__strokeSubmitStatus.status='failed';
+ *                     window.__strokeSubmitStatus.error = String(error); });
+ * ```
+ *
+ * 即：**动态 import 画板所在模块 → 调 `d()` 拿 store → `store.pad` 就是画板**，
+ * 不需要遍历组件树。设备上该模块是 `useRecognizeBoard-legacy.<hash>.js`
+ * （导出 `{pad, recognizeConfig, onRecognize, ...}`，与 `store.pad` 对应）。
+ *
+ * ### 本实现（不硬编码 hash）
+ *
+ * SimianV2 把 `index-legacy.DMgv2yXx.js` 这个 **hash 写死了**，官方每次发版都会变
+ * （同一份 `pk.html` 里 20 多个 hash 各不相同）——写死必然过期。
+ * 这里改成**自适应**，依次尝试：
+ *
+ *  1. 扫 `System.entries()` / `performance.getEntriesByType('resource')` 里所有
+ *     `leo-web-oral-pk/assets/` 下的 `.js` 模块，逐个 `System.import` 后取 `d().pad`（不传 hash）；
+ *  2. 若拿不到，再退**遍历 Vue 组件树**（旧逻辑保留作兜底，某些页面确实只有这条路）；
+ *  3. 两条都失败才报 failed，并把诊断写进 `window.__strokeSubmitStatus`。
+ */
 internal object SimianV2PkAutomation {
     private enum class Task { STROKE, HAPPY, CONTINUE, CONTINUE_PK }
     private val handler = Handler(Looper.getMainLooper())
     private val tasks = mutableMapOf<Task, Runnable>()
     private data class StrokeSession(val webView: WebView, val tasks: MutableSet<Runnable> = linkedSetOf())
     private var strokeSession: StrokeSession? = null
-    private val points = listOf(PointF(146.8571f,498.5714f),PointF(146.8571f,516.2858f),PointF(146.8571f,544.4261f),PointF(148f,561.7143f),PointF(148f,584f),PointF(148f,610.8572f),PointF(148f,627.7143f),PointF(149.7143f,652.2858f),PointF(151.4286f,668f),PointF(153.1429f,675.7143f),PointF(156.8571f,684.5715f))
 
-    /** One cancellable session owns every delayed stroke for the current exercise page. */
+    /** 与 SimianV2 同一组笔画点（左下角竖线，识别为「1」，任何答案模式都能命中）。 */
+    private val points = listOf(
+        PointF(146.8571f, 498.5714f), PointF(146.8571f, 516.2858f), PointF(146.8571f, 544.4261f),
+        PointF(148f, 561.7143f), PointF(148f, 584f), PointF(148f, 610.8572f), PointF(148f, 627.7143f),
+        PointF(149.7143f, 652.2858f), PointF(151.4286f, 668f), PointF(153.1429f, 675.7143f),
+        PointF(156.8571f, 684.5715f)
+    )
+
+    /** 一次可取消的提交会话：拥有当前答题页的全部延迟提交任务。 */
     fun scheduleStroke(webView: WebView, firstDelay: Long) {
         strokeSession?.let { active -> cancelStrokeSession(active.webView, "replaced by a new exercise page") }
         val rewrittenSet = SimianV2AutomationPrefs.linkedCustomAnswer
         val nativeN = PkNativeSession.nativeQuestionCount
-        val countSource = when { rewrittenSet -> "rewrite"; nativeN > 0 -> "native-match"; else -> "config" }
+        val countSource = when {
+            rewrittenSet -> "rewrite"
+            nativeN > 0 -> "native-match"
+            else -> "config"
+        }
         val total = when {
             rewrittenSet -> Simian.strokeSubmissionCount
             nativeN > 0 -> nativeN
             else -> Simian.strokeSubmissionCount
         }
         val interval = SimianV2AutomationPrefs.submitInterval.coerceAtLeast(0L)
-        // 秒提交：去掉开场等待，用快速尝试轮询待页面/画板就绪后立即提交。
-        val effectiveFirst = if (SimianV2AutomationPrefs.quickSubmit) SimianV2AutomationPrefs.quickDelay.coerceAtLeast(0L) else firstDelay.coerceAtLeast(0L)
+        val effectiveFirst =
+            if (SimianV2AutomationPrefs.quickSubmit) SimianV2AutomationPrefs.quickDelay.coerceAtLeast(0L)
+            else firstDelay.coerceAtLeast(0L)
         val session = StrokeSession(webView)
         strokeSession = session
         repeat(total) { index ->
             lateinit var task: Runnable
             task = Runnable {
                 if (strokeSession !== session || !session.tasks.remove(task)) return@Runnable
-                if (!webView.isAttachedToWindow) { logI("SimianV2 笔画提交失败：WebView已经离开窗口"); return@Runnable }
+                if (!webView.isAttachedToWindow) {
+                    logI("SimianV2 笔画提交失败：WebView已经离开窗口")
+                    return@Runnable
+                }
                 submitWithRetry(webView, index + 1, total, 0, SimianV2AutomationPrefs.quickSubmit)
                 if (session.tasks.isEmpty() && strokeSession === session) strokeSession = null
             }
@@ -50,7 +109,7 @@ internal object SimianV2PkAutomation {
         logI("SimianV2 stroke session scheduled: $total first=${effectiveFirst}ms interval=${interval}ms (source=$countSource)")
     }
 
-    /** Cancels the complete delayed-stroke sequence for this WebView. */
+    /** 取消该 WebView 上全部待执行的笔画任务。 */
     fun cancelStrokeSession(webView: WebView, reason: String) {
         val session = strokeSession ?: return
         if (session.webView !== webView) return
@@ -61,14 +120,14 @@ internal object SimianV2PkAutomation {
         if (cancelled > 0) logI("SimianV2 stroke session cancelled: $cancelled ($reason)")
     }
 
-    /** 带重试的笔画提交：失败时重复提交，不超过 retryMax 次，间隔 retryDelay 毫秒。 */
+    /** 带重试的笔画提交：失败重复提交，不超过 retryMax 次，间隔 retryDelay 毫秒。 */
     private fun submitWithRetry(webView: WebView, index: Int, total: Int, attempt: Int, quick: Boolean) {
         if (!webView.isAttachedToWindow) return
         submitStrokeOnce(webView, index, total) { ok ->
             if (ok) return@submitStrokeOnce
             val max = if (quick) 2000 else SimianV2AutomationPrefs.retryMax.coerceAtLeast(1)
             if (attempt < max) {
-                val rd = (if (quick) 150L else SimianV2AutomationPrefs.retryDelay.coerceAtLeast(0L))
+                val rd = if (quick) 150L else SimianV2AutomationPrefs.retryDelay.coerceAtLeast(0L)
                 logI("SimianV2 笔画提交 $index/$total 失败，重试 ${attempt + 1}/$max (间隔 ${rd}ms)")
                 handler.postDelayed({ submitWithRetry(webView, index, total, attempt + 1, quick) }, rd)
             } else {
@@ -79,7 +138,10 @@ internal object SimianV2PkAutomation {
 
     /** 执行一次笔画提交，延迟读最终状态并回调 ok。 */
     private fun submitStrokeOnce(webView: WebView, index: Int, total: Int, onDone: (Boolean) -> Unit) {
-        if (!webView.isAttachedToWindow) { logI("SimianV2 笔画提交失败：WebView已经离开窗口"); return }
+        if (!webView.isAttachedToWindow) {
+            logI("SimianV2 笔画提交失败：WebView已经离开窗口")
+            return
+        }
         val startTime = System.currentTimeMillis()
         val pointsJson = JSONArray().apply {
             points.forEachIndexed { pointIndex, point ->
@@ -91,21 +153,83 @@ internal object SimianV2PkAutomation {
                 })
             }
         }
+        // 注意：脚本内**不要**再出现 `${...}` Kotlin 模板拼接；用 $pointsJson 一处足够。
+        // 内嵌 JS 一律避免正则字面量（历史事故：模板渲染后语法错误导致整段注入失效）。
         val script = """
 (() => {
     const points = $pointsJson;
     const status = window.__strokeSubmitStatus = { status: 'finding-pad', pointCount: points.length };
     const unref = t => (t && typeof t === 'object' && 'value' in t) ? t.value : t;
     const isPad = p => !!p && typeof p.dispatchEvent === 'function' && typeof p.toData === 'function';
-    const isLive = cfg => !!cfg && !!cfg.keypointId;
-    // 画板实例不是放在 Pinia store 里，而是 useRecognizeBoard 这个 composable 内部的局部 ref。
-    // 真机 probe 已证实：globalProperties 无 dollar-pinia、System.entries() 为空、PK 页面不走离线包。
-    // 唯一能拿到活体 pad 的方式：遍历 Vue 组件树，找 setupState 上带 pad/recognizeConfig 的组件。
-    const looksLikePad = v => isPad(unref(v));
-    // ---- 诊断：遍历组件树并记录每层观察，写进 status.walk ----
-    const walkLog = [];
+
+    // ---------- 与 SimianV2 一致的提交动作 ----------
+    const commit = pad => {
+        pad._data = [{
+            points: points, penColor: '#000', minWidth: 3, maxWidth: 3,
+            velocityFilterWeight: 0.7, compositeOperation: 'source-over'
+        }];
+        if ('_isEmpty' in pad) pad._isEmpty = false;
+        try {
+            if (typeof pad._fromData === 'function') {
+                pad._fromData(pad._data, pad._drawCurve.bind(pad), pad._drawDot.bind(pad));
+            }
+        } catch (e) {}
+        if ('_isEmpty' in pad) pad._isEmpty = false;
+        status.status = 'dispatching-end-stroke';
+        pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
+        status.status = 'submitted';
+    };
+
+    // ---------- 路线 A（SimianV2 同款）：动态 import 模块取 store.pad ----------
+    const padFrom = (m, where) => {
+        if (!m) return null;
+        let store = null;
+        try { store = (typeof m.d === 'function') ? m.d() : (m.default || null); } catch (e) { return null; }
+        if (!store) return null;
+        const pad = unref(store.pad);
+        if (isPad(pad)) { status.via = where; return pad; }
+        return null;
+    };
+    const candidateUrls = () => {
+        const urls = new Set();
+        try {
+            if (typeof System !== 'undefined' && typeof System.entries === 'function') {
+                System.entries().forEach((v, k) => {
+                    if (typeof k === 'string' && k.indexOf('leo-web-oral-pk') >= 0 && k.slice(-3) === '.js') urls.add(k);
+                });
+            }
+        } catch (e) {}
+        try {
+            performance.getEntriesByType('resource').forEach(e => {
+                const n = e && e.name ? e.name : '';
+                if (n.indexOf('leo-web-oral-pk') >= 0 && n.indexOf('/assets/') >= 0 && n.slice(-3) === '.js') urls.add(n);
+            });
+        } catch (e) {}
+        return Array.from(urls);
+    };
+    const tryImportRoute = async () => {
+        const urls = candidateUrls();
+        status.candidates = urls.length;
+        for (const u of urls) {
+            try {
+                const m = await System.import(u);
+                const pad = padFrom(m, 'import:' + u.split('/').pop());
+                if (pad) return pad;
+            } catch (e) {}
+        }
+        return null;
+    };
+
+    // ---------- 路线 B（兜底）：遍历 Vue 组件树 / 全局 ----------
     let hitSeen = null;
-    const subTreeChildren = vnode => {
+    const scanInstance = (inst, depth) => {
+        if (!inst || hitSeen || depth > 60) return;
+        const st = inst.setupState || {};
+        const p1 = unref(st.pad);
+        if (isPad(p1)) { hitSeen = p1; return; }
+        const ctx = inst.ctx || {};
+        const p2 = unref(ctx.pad);
+        if (isPad(p2)) { hitSeen = p2; return; }
         const kids = [];
         const walk = v => {
             if (!v) return;
@@ -113,238 +237,56 @@ internal object SimianV2PkAutomation {
             if (Array.isArray(v.children)) v.children.forEach(walk);
             if (v.suspense && v.suspense.activeBranch) walk(v.suspense.activeBranch);
         };
-        walk(vnode);
-        return kids;
-    };
-    const scanInstance = (inst, depth) => {
-        if (!inst || hitSeen) return;
-        if (depth > 60) return;
-        const st = inst.setupState || {};
-        const stKeys = Object.keys(st);
-        const hasPad = !!st.pad;
-        const hasCfg = !!st.recognizeConfig;
-        const padObj = unref(st.pad);
-        const cfgObj = unref(st.recognizeConfig);
-        const rec = {
-            d: depth,
-            name: (inst.type && (inst.type.name || inst.type.__name)) || '',
-            stKeys: stKeys.slice(0, 20),
-            hasPad: hasPad,
-            padShape: hasPad ? (typeof padObj + (padObj && typeof padObj === 'object' ? ':' + Object.getOwnPropertyNames(padObj).slice(0, 10).join(',') : '')) : '',
-            hasCfg: hasCfg,
-            cfgKeypoint: cfgObj && cfgObj.keypointId
-        };
-        walkLog.push(rec);
-        // 放宽：拿到真实画板即命中（config 可能晚于画板就绪，不能因此错过窗期）。
-        if (hasPad && isPad(padObj)) {
-            hitSeen = { source: 'vue-setup-pad', pad: padObj, config: cfgObj || {}, live: isLive(cfgObj) };
-            return;
-        }
-        const ctx = inst.ctx || {};
-        const ctxPad = unref(ctx.pad);
-        if (ctxPad && isPad(ctxPad)) {
-            const ctxCfg = unref(ctx.recognizeConfig) || {};
-            hitSeen = { source: 'vue-ctx-pad', pad: ctxPad, config: ctxCfg, live: isLive(ctxCfg) };
-            return;
-        }
-        const kids = subTreeChildren(inst.subTree);
+        walk(inst.subTree);
         for (const k of kids) { scanInstance(k, depth + 1); if (hitSeen) return; }
     };
-    // 在任意 document 根（含 iframe contentDocument、ShadowRoot）上找 __vue_app__。
-    // 宿主为 System.register + 远端 bundle 架构，createApp 的挂载点未必是 #app，
-    // 也可能落在 iframe / Shadow DOM / window / Vue 全局上，这里逐层兜底。
-    const findVueAppIn = rootDoc => {
-        if (!rootDoc || hitSeen) return null;
-        const appEl = rootDoc.getElementById ? rootDoc.getElementById('app') : null;
-        if (appEl && appEl.__vue_app__) return { app: appEl.__vue_app__, via: 'app-el' };
-        // 兜底 A：#app 后代 DFS，上限放宽到 400
-        if (appEl) {
-            const stack = [appEl]; let n = 0;
-            while (stack.length && n < 400) {
-                const cur = stack.pop(); n++;
-                if (cur.__vue_app__) return { app: cur.__vue_app__, via: 'app-descendant' };
-                const kids = cur.children;
-                if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
-            }
+    const scanDom = () => {
+        const els = document.querySelectorAll('*');
+        const cap = Math.min(els.length, 6000);
+        for (let i = 0; i < cap && !hitSeen; i++) {
+            const inst = els[i].__vueParentComponent || (els[i].__vnode && els[i].__vnode.component) || null;
+            let cur = inst, d = 0;
+            while (cur && d < 40 && !hitSeen) { scanInstance(cur, d); cur = cur.parent; d++; }
         }
-        // 兜底 B：全文档扫，含 shadowRoot 探测
-        const all = rootDoc.querySelectorAll ? rootDoc.querySelectorAll('*') : [];
-        const cap = Math.min(all.length, 4000);
-        for (let i = 0; i < cap; i++) {
-            const el = all[i];
-            if (el.__vue_app__) return { app: el.__vue_app__, via: 'document-scan' };
-            if (el.shadowRoot && el.shadowRoot.__vue_app__) return { app: el.shadowRoot.__vue_app__, via: 'shadow-root' };
+    };
+    const scanVue = () => {
+        scanDom();
+        if (hitSeen) return hitSeen;
+        const appEl = document.getElementById('app');
+        const app = appEl && appEl.__vue_app__;
+        if (app) {
+            let root = app._instance || (app._container && app._container._vnode && app._container._vnode.component);
+            scanInstance(root, 0);
         }
-        // 兜底 C：window 直接挂载
-        if (rootDoc.defaultView && rootDoc.defaultView.__vue_app__) {
-            return { app: rootDoc.defaultView.__vue_app__, via: 'window' };
+        if (hitSeen) return hitSeen;
+        const provides = (app && app._context && app._context.provides) || {};
+        for (const k of Object.keys(provides)) {
+            const p = unref(provides[k] && provides[k].pad);
+            if (isPad(p)) { hitSeen = p; return hitSeen; }
         }
-        // 兜底 D：Vue 3 runtime 全局暴露
-        const w = rootDoc.defaultView || {};
-        if (w.Vue && w.Vue.__app__) return { app: w.Vue.__app__, via: 'vue-global' };
-        return null;
+        return hitSeen;
     };
 
-    const findVueApp = () => {
-        let found = findVueAppIn(document);
-        if (found) return found;
-        const iframes = document.querySelectorAll('iframe');
-        for (let i = 0; i < iframes.length && i < 20; i++) {
-            let doc = null;
-            try { doc = iframes[i].contentDocument; } catch (_) { continue; }
-            if (!doc) continue;
-            found = findVueAppIn(doc);
-            if (found) { found.via = 'iframe:' + i + ':' + found.via; return found; }
-        }
-        return null;
-    };
-    // 遍历一棵 Vue app：_instance 为空时回退到 container._vnode.component，
-    // 覆盖 createApp 挂载到非 #app 容器、或 #app 仅作外壳的情况。
-    const scanApp = app => {
-        if (!app || hitSeen) return;
-        let root = app._instance;
-        if (!root && app._container) root = app._container._vnode && app._container._vnode.component;
-        scanInstance(root, 0);
-    };
-
-    // ---- 最稳的一条路：直接扫 DOM ----
-    // Vue3 在组件挂载的**每个元素**上挂 `__vueParentComponent`（元素级引用），
-    // 不依赖 app._instance（3.141.1 上它为 null，导致 walkCount=0、遍历全空）。
-    // 从元素拿到实例后沿 .parent 链向上补扫，覆盖 setupState / ctx 两种存放位置。
-    // 若写字板在 iframe 内，则递归进各 iframe 的 contentDocument。
-    const scanDomForPad = () => {
-        const visitDoc = (doc, tag) => {
-            if (!doc || hitSeen) return;
-            let els = [];
-            try { els = doc.querySelectorAll('*'); } catch (_) { return; }
-            const cap = Math.min(els.length, 6000);
-            for (let i = 0; i < cap; i++) {
-                const el = els[i];
-                const inst = el.__vueParentComponent || (el.__vnode && el.__vnode.component) || null;
-                if (!inst) continue;
-                let cur = inst, d = 0;
-                while (cur && d < 40 && !hitSeen) {
-                    scanInstance(cur, d);
-                    cur = cur.parent;
-                    d++;
-                }
-                if (hitSeen) { status.domScanVia = tag; return; }
-            }
-            let iframes = [];
-            try { iframes = doc.querySelectorAll('iframe'); } catch (_) { }
-            for (let i = 0; i < iframes.length && i < 20; i++) {
-                let sub = null;
-                try { sub = iframes[i].contentDocument; } catch (_) { continue; }
-                if (sub) visitDoc(sub, tag + '/iframe' + i);
-                if (hitSeen) return;
-            }
-        };
-        visitDoc(document, 'main');
-    };
-    const collect = () => {
-        // A) 先走 DOM 组件实例扫描（最稳，不依赖 app._instance）
-        scanDomForPad();
-        status.walk = walkLog.slice(0, 40);
-        status.walkCount = walkLog.length;
-        if (hitSeen) { status.piniaFound = 1; return hitSeen; }
-        // B) 退回遍历 Vue app 树
-        const found = findVueApp();
-        status.vueAppVia = found ? found.via : 'none';
-        if (!found) return null;
-        const app = found.app;
-        scanApp(app);
-        status.walk = walkLog.slice(0, 40);
-        status.walkCount = walkLog.length;
-        if (hitSeen) { status.piniaFound = 1; return hitSeen; }
-        const provides = (app._context && app._context.provides) || {};
-        const pKeys = Object.keys(provides);
-        status.providesKeys = pKeys.slice(0, 20);
-        for (const k of pKeys) {
-            let v = null;
-            try { v = provides[k]; } catch (_) { continue; }
-            const pad = unref(v && v.pad);
-            const cfg = unref(v && v.recognizeConfig);
-            if (isPad(pad)) { status.piniaFound = 1; return { source: 'vue-provides', pad: pad, config: cfg || {} }; }
-        }
-        status.piniaFound = 0;
-        return null;
-    };
-    const fromRegistry = async () => {
-        if (typeof System === 'undefined' || typeof System.import !== 'function' || typeof System.entries !== 'function') return null;
-        const urls = [];
-        System.entries().forEach((v, k) => {
-            if (typeof k === 'string' && k.indexOf('index-legacy.') >= 0 && k.slice(-3) === '.js') urls.push(k);
-        });
-        status.registry = urls;
-        for (const url of urls) {
-            try {
-                const m = await System.import(url);
-                if (typeof m.d !== 'function') continue;
-                const store = m.d();
-                const pad = unref(store && store.pad);
-                const cfg = unref(store && store.recognizeConfig);
-                if (!isPad(pad) || !isLive(cfg)) continue;
-                return { source: 'systemjs-registry', pad: pad, config: cfg };
-            } catch (_) { }
-        }
-        return null;
-    };
-    const groupsFromPoints = () => [{ points: points, penColor: '#000', minWidth: 3, maxWidth: 3, dotSize: 0, velocityFilterWeight: 0.7, compositeOperation: 'source-over' }];
-    const commit = found => {
-        status.source = found.source;
-        const cfg = found.config || {};
-        status.keypointId = cfg.keypointId;
-        status.expectedResult = cfg.answers;
-        status.configLive = !!cfg.keypointId;
-        const pad = found.pad;
-        status.status = 'injecting-data';
-        // 优先走画板自身的数据注入 API：fromData 会把点集正规化为贝塞尔段并真正画到 canvas，
-        // 这样后续 endStroke 监听器通过 toData() 读到的是完整笔画，识别端不再拿到空内容。
-        let injected = false;
-        try {
-            if (typeof pad.fromData === 'function') {
-                pad.fromData(groupsFromPoints(), { clear: true });
-                injected = true;
-                status.injectMode = 'fromData';
-            }
-        } catch (err) {
-            status.injectError = String(err && err.message ? err.message : err);
-        }
-        // 回退：直接写 _data 并同步 _isEmpty / 重绘，兼容没有 fromData 的旧画板实现。
-        if (!injected) {
-            pad._data = groupsFromPoints();
-            if ('_isEmpty' in pad) { pad._isEmpty = false; }
-            try {
-                if (typeof pad._fromData === 'function') {
-                    pad._fromData(pad._data, pad._drawCurve.bind(pad), pad._drawDot.bind(pad));
-                }
-            } catch (_) { }
-            if ('_isEmpty' in pad) { pad._isEmpty = false; }
-            status.injectMode = 'raw-data';
-        }
-        status.status = 'dispatching-end-stroke';
-        try {
-            pad.dispatchEvent(new CustomEvent('endStroke', { detail: { synthetic: true } }));
-            status.dispatchOk = true;
-        } catch (err2) {
-            status.dispatchOk = false;
-            status.dispatchError = String(err2 && err2.message ? err2.message : err2);
+    // ---------- 主流程：先 DOM 扫（同步、最快），再 import（异步） ----------
+    try {
+        const live = scanVue();
+        if (live) { status.via = 'vue-tree'; commit(live); return JSON.stringify(status); }
+    } catch (e) {
+        status.vueScanError = String(e && e.message ? e.message : e);
+    }
+    if (typeof System !== 'undefined' && typeof System.import === 'function') {
+        tryImportRoute().then(pad => {
+            if (pad) { commit(pad); return; }
             status.status = 'failed';
-            status.error = 'endStroke dispatch threw: ' + status.dispatchError;
-            return;
-        }
-        status.status = 'waiting-recognition';
-    };
-    const live = collect();
-    if (live) { commit(live); return JSON.stringify(status); }
-    fromRegistry().then(found => {
-        if (found) { commit(found); return; }
+            status.error = 'no pad: import candidates=' + (status.candidates || 0) + ', vue-tree=miss';
+        }).catch(err => {
+            status.status = 'failed';
+            status.error = String(err && err.message ? err.message : err);
+        });
+    } else {
         status.status = 'failed';
-        status.error = 'no live pad found in pinia store or SystemJS registry';
-    }).catch(err => {
-        status.status = 'failed';
-        status.error = String(err && err.message ? err.message : err);
-    });
+        status.error = 'System.import unavailable and vue-tree miss';
+    }
     return JSON.stringify(status);
 })();
 """.trimIndent()
@@ -353,19 +295,28 @@ internal object SimianV2PkAutomation {
             webView.evaluateJavascript(script) { result ->
                 logI("SimianV2 笔画提交 $index/$total result: " + result)
                 handler.postDelayed({
-                    if (!webView.isAttachedToWindow) { onDone(false); return@postDelayed }
+                    if (!webView.isAttachedToWindow) {
+                        onDone(false)
+                        return@postDelayed
+                    }
                     webView.evaluateJavascript("JSON.stringify(window.__strokeSubmitStatus || { status: 'missing' })") { raw ->
                         val final = (raw ?: "null")
                         logI("SimianV2 笔画提交 $index/$total final: " + final)
-                        onDone(final.contains("waiting-recognition") || final.contains("dispatching-end-stroke"))
+                        onDone(final.contains("submitted") || final.contains("dispatching-end-stroke"))
                     }
-                }, 1200L)
+                }, 1500L)
             }
         }
     }
-    fun clickHappyAccept(webView: WebView, delay: Long = 3000L) = schedule(Task.HAPPY, webView, delay, "开心收下") { click(webView,"开心收下") }
-    fun clickContinue(webView: WebView, delay: Long = 500L) = schedule(Task.CONTINUE, webView, delay, "继续") { click(webView,"继续") }
-    fun clickContinuePk(webView: WebView, delay: Long = 2000L) = schedule(Task.CONTINUE_PK, webView, delay, "继续PK") { click(webView,"继续PK") }
+
+    fun clickHappyAccept(webView: WebView, delay: Long = 3000L) =
+        schedule(Task.HAPPY, webView, delay, "开心收下") { click(webView, "开心收下") }
+
+    fun clickContinue(webView: WebView, delay: Long = 500L) =
+        schedule(Task.CONTINUE, webView, delay, "继续") { click(webView, "继续") }
+
+    fun clickContinuePk(webView: WebView, delay: Long = 2000L) =
+        schedule(Task.CONTINUE_PK, webView, delay, "继续PK") { click(webView, "继续PK") }
 
     private fun schedule(kind: Task, webView: WebView, delay: Long, label: String, action: () -> Unit) {
         tasks.remove(kind)?.let(handler::removeCallbacks)
@@ -373,23 +324,31 @@ internal object SimianV2PkAutomation {
         task = Runnable {
             if (tasks[kind] !== task) return@Runnable
             tasks.remove(kind)
-            if (!webView.isAttachedToWindow) { logI("SimianV2 " + label + " cancelled: WebView detached"); return@Runnable }
-            runCatching(action).onFailure { error -> logI("SimianV2 " + label + " failed: " + error.message) }
+            if (!webView.isAttachedToWindow) {
+                logI("SimianV2 $label cancelled: WebView detached")
+                return@Runnable
+            }
+            runCatching(action).onFailure { error -> logI("SimianV2 $label failed: " + error.message) }
         }
         tasks[kind] = task
         handler.postDelayed(task, delay.coerceAtLeast(0L))
     }
+
     private fun click(webView: WebView, label: String) {
         val text = JSONObject.quote(label)
         val script = """(() => {
-            const t=$text, visible=e=>{if(!e)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0}, textOf=e=>(e.textContent||'').replace(/\s+/g,'');
-            const button=[...document.querySelectorAll('button,[role=button],.button,.btn,.retry,.modal-confirm,.bottom-content-button,.btn-confirm-wrap')].find(e=>visible(e)&&textOf(e)===t);
+            const t=$text, visible=e=>{if(!e)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0}, textOf=e=>(e.textContent||'').split(/\s+/).join('');
+            const button=[].slice.call(document.querySelectorAll('button,[role=button],.button,.btn,.retry,.modal-confirm,.bottom-content-button,.btn-confirm-wrap')).filter(e=>visible(e)&&textOf(e)===t)[0];
             if(button) button.click(); else console.log('SimianV2 missing '+t);
         })();""".trimIndent()
         evaluate(webView, script, "点击" + label)
     }
+
     private fun evaluate(webView: WebView, script: String, action: String) = webView.post {
-        if (!webView.isAttachedToWindow) { logI("SimianV2 " + action + " failed: WebView detached"); return@post }
-        webView.evaluateJavascript(script) { result -> logI("SimianV2 " + action + " result: " + result) }
+        if (!webView.isAttachedToWindow) {
+            logI("SimianV2 $action failed: WebView detached")
+            return@post
+        }
+        webView.evaluateJavascript(script) { result -> logI("SimianV2 $action result: " + result) }
     }
 }

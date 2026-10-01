@@ -9,72 +9,81 @@ import io.github.libxposed.api.XposedInterface
 /**
  * 「任何答案为正确答案」—— 把识别结果替换成**期望答案**。
  *
- * ## 为什么需要它
+ * ## 参考实现（SimianV2 `com.log.simianv2`，设备实测可用）
  *
- * 手写识别的返回值决定 H5 判对与否。原先有两条路：
- *  - `RecognizerHook`：hook 宿主的 `MathScriptRecognizer.a(int,List,List)`；
- *  - 本类：SimianV2 的 DexKit 定位版。
+ * 反编译其 `classes.dex` 得到的判定依据：
+ *  - 它同样使用 **DexKit**（`lib/arm64-v8a/libdexkit.so` 随包分发）；
+ *  - 它同样以字符串 **`/time/recognize/math`** 作为识别入口的定位特征；
+ *  - 它也 hook 宿主的 `com.fenbi.android.leo.webapp.secure.commands.EncryptResult`。
  *
- * 但 **`MathScriptRecognizer` 在 3.140+ 已被宿主移除**，所以 `RecognizerHook`
- * 只剩「找不到类就退出」的死代码 —— 现在真正生效的只有本类。
+ * 说明：**定位特征与本类策略一致**（`(int, List, List)` + `/time/recognize/math`），
+ * 所以「抄袭 SimianV2」不是换一个特征，而是**保证定位一定被执行到**。
  *
- * ## ★★ 2026-10-01 修复（原实现「搜不到就不装」，是失效的主因）
+ * ## ★★ 2026-10-01 二次修复：为什么「什么都没发生」
  *
- * 原实现的问题：
- *  1. `findMethods(...).singleOrNull()` —— DexKit 匹配到 **0 个或 >1 个**就直接放弃，
- *     而且**只挂一次**（`addReadyListener` 回调里），失败后**没有重试**；
- *  2. `usingStrings(Equals)` 要求 DexKit 精确看到 `/time/recognize/math` 这个常量；
- *     宿主改版/常量挪位置时就会匹配不到；
- *  3. 命中不足时**不打印匹配数量**，日志里只看到一句失败，无法判断是 0 还是多个。
+ * 上一版把定位挂在 `DexKitCoordinator.addReadyListener` 上，真机日志里
+ * **连一行 `attempt#` 都没有** —— 说明 `installResolvedHook` 从未被调用。可能原因：
  *
- * 现在的做法：
- *  - **多策略**依次尝试（精确字符串 → 仅按参数类型），每种都打印命中数量；
- *  - 命中 >1 时**全部挂上**（多挂一个识别入口没有副作用：识别入口只在答题时被调）；
- *  - 定位失败**自动重试**（宿主可能稍后才完成类加载），最多 [MAX_ATTEMPTS] 次；
- *  - 每次尝试都留日志，便于真机定位。
+ *  1. `DexKitCoordinator.publish(FAILED)` 时**不会**触发 readyListeners
+ *     （旧代码只在 `Phase.SUCCESS` 时回调）→ DexKit 初始化失败就**永久静默**；
+ *  2. `DexKitCoordinator.start()` 由「第一个 Activity onResume」调用，若该回调没跑到，
+ *     `phase` 永远停在 `IDLE`，同样永久静默；
+ *  3. 旧实现失败时**没有任何日志**，真机上无法区分「没跑」「跑了没命中」「跑挂了」。
  *
- * ## 与原版语义一致的部分
+ * 现在的做法：**自己轮询**，不依赖 ready 回调。
+ *  - 每 [RETRY_DELAY_MS] 尝试一次，最多 [MAX_ATTEMPTS] 次；
+ *  - 每次尝试都写日志，包含 **DexKit bridge 是否就绪** 与 **命中数**；
+ *  - 命中多个时**全部挂上**（多挂无副作用）；
+ *  - 已成功则立即停止轮询。
  *
- * 命中后：`answers[0]` = 期望答案（由 H5 传入），**替换**原识别结果 →
- * 判题必然命中。这就是「任何答案为正确答案」。
+ * ## 语义
+ *
+ * 命中后：`answers[0]`（H5 传入的期望答案）非空 → **替换**原识别结果 → 判题必然命中。
+ * 这就是「任何答案为正确答案」。练习场景由 [SimianHook] 的 `QuestionVO.getAnswers`
+ * 与 `EncryptResult` 改写共同覆盖（与 SimianV2 的分工一致）。
  */
 class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) : BaseHook(self, classLoader) {
 
     override val name = "SimianV2QuickAnswerHook"
 
-    /** 已挂上的方法数（>0 表示本次定位成功）。 */
-    private val installedCount = java.util.concurrent.atomic.AtomicInteger(0)
+    /** 已挂上的方法数（>0 表示定位成功）。 */
+    @Volatile private var installedCount = 0
 
     /** 定位尝试次数（避免无限重试刷日志）。 */
-    private val attempts = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var attempts = 0
 
     override fun startHook() {
-        DexKitCoordinator.addReadyListener(::installResolvedHook)
+        // 不要只依赖 addReadyListener：DexKit 失败时它永不回调（旧版永久静默的根因）。
+        // 这里直接启动自轮询，ready 回调只用来「提前触发一次」。
+        DexKitCoordinator.addReadyListener { attemptInstall("ready-callback") }
+        attemptInstall("startHook")
     }
 
     /**
-     * 多策略定位「识别入口」并挂 hook。
+     * 尝试定位并挂 hook。失败或尚未就绪时按 [RETRY_DELAY_MS] 自动重试。
      *
-     * 识别入口的稳定特征：`(int, List, List)` 三参、返回 String。
-     * 其中第 3 个 List 通常是「期望答案候选」，第 2 个 List 是输入特征。
+     * @param trigger 触发来源（日志用，便于区分是 ready 回调还是轮询）
      */
-    private fun installResolvedHook() {
-        if (installedCount.get() > 0) return
-        val n = attempts.incrementAndGet()
+    private fun attemptInstall(trigger: String) {
+        if (installedCount > 0) return
+        val n = ++attempts
+        val dexKitReady = DexKitLocator.isReady()
+        if (!dexKitReady && n >= MAX_ATTEMPTS) {
+            logI("SimianV2 correct-answer: 放弃（DexKit 始终未就绪，attempt#=$n trigger=$trigger）")
+            return
+        }
 
-        // 策略 1：精确点 —— 参数类型 + 识别接口字符串常量
+        // 策略 1：精确点 —— 参数类型 + 识别接口字符串常量（与 SimianV2 同一特征）
         var candidates = locate(listOf("/time/recognize/math"))
-        // 策略 2：放宽 —— 只按参数类型（有些版本常量被内联/挪走）
+        // 策略 2：放宽 —— 只按参数类型（常量被内联/挪走时）
         if (candidates.isEmpty()) {
-            logI("SimianV2 correct-answer: strategy-1 (string) hit 0, fallback to param-types only")
             candidates = locate(emptyList())
         }
-        logI("SimianV2 correct-answer: attempt#$n matchers=${candidates.size}")
+        logI("SimianV2 correct-answer: attempt#$n trigger=$trigger dexKitReady=$dexKitReady matchers=${candidates.size}")
 
         if (candidates.isEmpty()) {
             if (n < MAX_ATTEMPTS) {
-                // 宿主可能尚未完成类加载：稍后重试（不影响其它功能）。
-                handlerPostDelayed(::installResolvedHook, RETRY_DELAY_MS)
+                cn.nizou.sxd.util.mainHandler.postDelayed({ attemptInstall("retry$n") }, RETRY_DELAY_MS)
             } else {
                 logI("SimianV2 correct-answer: 已达最大尝试次数($MAX_ATTEMPTS)，放弃定位")
             }
@@ -91,7 +100,6 @@ class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) :
                     }
                     val expected = (chain.getArg(2) as? List<*>)?.firstOrNull()?.toString()
                     val original = chain.proceed()
-                    // 期望答案非空就替换 —— 「任何答案为正确答案」。
                     if (!expected.isNullOrBlank()) expected else original
                 }
                 ok++
@@ -100,8 +108,10 @@ class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) :
                 logI("SimianV2 correct-answer hook ${m.declaringClass.name}#${m.name} failed: ${e.message}")
             }
         }
-        installedCount.set(ok)
-        if (ok == 0 && n < MAX_ATTEMPTS) handlerPostDelayed(::installResolvedHook, RETRY_DELAY_MS)
+        installedCount = ok
+        if (ok == 0 && n < MAX_ATTEMPTS) {
+            cn.nizou.sxd.util.mainHandler.postDelayed({ attemptInstall("retry-hookfail$n") }, RETRY_DELAY_MS)
+        }
     }
 
     /** 按给定字符串集合定位识别方法（返回全部命中，不去重也不单取）。 */
@@ -115,17 +125,11 @@ class SimianV2QuickAnswerHook(self: XposedInterface, classLoader: ClassLoader) :
         emptyList()
     }
 
-    /** `handler` 在 BaseHook 里；这里只做「延迟重试」的薄封装。 */
-    private fun handlerPostDelayed(block: () -> Unit, delayMs: Long) {
-        runCatching { cn.nizou.sxd.util.mainHandler.postDelayed(block, delayMs) }
-            .onFailure { logI("SimianV2 correct-answer: retry scheduling failed: ${it.message}") }
-    }
-
     private companion object {
-        /** 定位失败自动重试上限（宿主类加载可能滞后）。 */
-        const val MAX_ATTEMPTS = 8
+        /** 定位失败自动重试上限。 */
+        const val MAX_ATTEMPTS = 10
 
         /** 重试间隔。 */
-        const val RETRY_DELAY_MS = 2500L
+        const val RETRY_DELAY_MS = 2000L
     }
 }

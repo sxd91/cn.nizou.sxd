@@ -1,6 +1,7 @@
 package cn.nizou.sxd.hook
 
 import cn.nizou.sxd.Classname
+import cn.nizou.sxd.api.ScorePump
 import cn.nizou.sxd.entities.AutoAnswerMode
 import cn.nizou.sxd.util.PK
 import cn.nizou.sxd.util.Packet
@@ -212,8 +213,11 @@ class RetrofitHook(
     }
 
     /**
-     * 解析推荐知识点响应 `{"results":[{"name":"8、7、6加几","keypointId":41,"questionCnt":10,...}],...}`，
-     * 取第一个 keypointId + questionCnt 写入 prefs（ScorePump 真自定义分数默认值）。
+     * 解析推荐知识点响应 `{"results":[{"name":"8、7、6加几","keypointId":41,"questionCnt":10,...}],...}`。
+     *
+     * 2026-10-01：由「只取第一条」改为**全量缓存**（`ScorePump.updateKeypointOptions`），
+     * 供自定义分数页做知识点下拉 —— 与 pk-node 的能力对齐（不再需要手填 id / 盲扫）。
+     * 第一条仍写入 `custom_score_keypoint` 作为默认值。
      */
     private fun captureRecommendKeypoint(text: String?) {
         if (text.isNullOrBlank()) return
@@ -221,12 +225,21 @@ class RetrofitHook(
             val json = JSONObject(text)
             val results = json.optJSONArray("results") ?: return
             if (results.length() == 0) return
+            val all = ArrayList<Triple<String, String, Int>>(results.length())
+            for (i in 0 until results.length()) {
+                val o = results.getJSONObject(i)
+                val id = o.optInt("keypointId", 0)
+                if (id <= 0) continue
+                all += Triple(id.toString(), o.optString("name"), o.optInt("questionCnt", 0))
+            }
+            if (all.isEmpty()) return
+            ScorePump.updateKeypointOptions(all)
             val first = results.getJSONObject(0)
             val kp = first.optInt("keypointId", 0)
             val cnt = first.optInt("questionCnt", 0)
             if (kp > 0) {
                 SettingsPrefs.writeString("custom_score_keypoint", kp.toString())
-                logI("recommend keypoint auto-recorded: id=$kp questionCnt=$cnt")
+                logI("recommend keypoint auto-recorded: id=$kp questionCnt=$cnt (options=${all.size})")
             }
             if (cnt > 0) {
                 SettingsPrefs.writeString("custom_score_limit", cnt.toString())

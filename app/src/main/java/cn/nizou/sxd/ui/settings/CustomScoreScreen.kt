@@ -327,14 +327,61 @@ fun CustomScoreScreen(onBack: () -> Unit) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                val kpOptions = remember { ScorePump.loadKeypointOptions() }
+                if (kpOptions.isNotEmpty()) {
+                    Text("知识点（来自宿主首页推荐 /leo-math/android/recommend/keypoint）", style = MaterialTheme.typography.titleSmall)
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        val current = kpOptions.firstOrNull { it.first == keyPointId.trim() }
+                        Text(
+                            text = "当前选择：" + (current?.let { "${it.second}（id=${it.first}，${it.third} 题）" }
+                                ?: keyPointId.ifBlank { "未选择（将自动使用/扫描）" }),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        kpOptions.take(20).forEach { (id, name, cnt) ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        keyPointId = id
+                                        SettingsPrefs.writeString("custom_score_keypoint", id)
+                                        if (cnt > 0) {
+                                            limit = cnt.toString()
+                                            SettingsPrefs.writeString("custom_score_limit", cnt.toString())
+                                        }
+                                    }
+                            ) {
+                                RadioButton(selected = keyPointId.trim() == id, onClick = {
+                                    keyPointId = id
+                                    SettingsPrefs.writeString("custom_score_keypoint", id)
+                                })
+                                Column {
+                                    Text(name.ifBlank { "知识点 $id" }, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        "id=$id · $cnt 题/局",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        "尚未捕获到知识点列表：请先在小猿口算首页停留几秒（会拉取 /recommend/keypoint），再回来刷新。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 OutlinedTextField(
                     value = keyPointId,
                     onValueChange = {
                         keyPointId = it.filter { c -> c.isDigit() }
                         SettingsPrefs.writeString("custom_score_keypoint", it)
                     },
-                    label = { Text("知识点 ID（首页自动记录，可手动改）") },
-                    placeholder = { Text("留空 = 自动使用首页推荐知识点") },
+                    label = { Text("知识点 ID（可手填覆盖）") },
+                    placeholder = { Text("留空 = 自动使用推荐/自动扫描") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()

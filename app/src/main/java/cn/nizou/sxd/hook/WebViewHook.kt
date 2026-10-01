@@ -77,23 +77,43 @@ class WebViewHook(
      *
      * `eruda.js` 只是把 `window.eruda` 挂上去；**不调 `init()` 不会浮面板**。
      *
-     * ## 为什么加 `_isInit` 守卫
+     * ## ★★ 2026-10-01 修复：为什么用户「看不到效果」
      *
-     * 同一次页面加载 `onPageFinished` 可能回调多次（含 iframe），
-     * 重复 `init()` 会叠出多个面板。所以先探一下 `eruda._isInit`。
+     * 旧实现走 `loadUrl("javascript:(function(){ <474KB 的 eruda.js> })();")`。
+     * `eruda.js` 有 **474KB**，而 `javascript:` URI 走的是 URL 解析路径 ——
+     * WebView 对超长 `javascript:` URL 会拒绝/截断（历史上还有换行、`#`、`%` 等
+     * 需转义字符会直接破坏 URI 语义）。结果就是「日志说 injected，页面毫无反应」。
+     *
+     * 现在改用 **`WebView.evaluateJavascript`**：不经 URL 解析、没有长度与转义限制，
+     * 是大脚本注入的唯一可靠通道（`quick.js` 等小脚本仍保留原路径）。
+     *
+     * 同时打印**分步结果**（脚本是否挂上 `window.eruda`、`init()` 是否成功），
+     * 便于真机直接判断卡在哪一步。
      */
     private fun injectEruda(loadUrl: Method, webView: View) {
-        try {
-            injectJsCode(erudaJs, loadUrl, webView)
-            injectJsCode(
-                "if(window.eruda&&!window.eruda._isInit){eruda.init({useShadowDom:true,defaultPanel:'console'});" +
-                    "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}}",
-                loadUrl,
-                webView,
-            )
-            logI("eruda (H5 调试器) injected")
-        } catch (e: Throwable) {
-            logI("injectEruda failed: ${e.message}")
+        val wv = webView as? android.webkit.WebView ?: run {
+            logI("injectEruda skipped: view is not a WebView")
+            return
+        }
+        wv.post {
+            runCatching {
+                wv.evaluateJavascript(erudaJs, null)
+            }.onFailure { logI("injectEruda script failed: ${it.message}") }
+
+            // 脚本注入是异步的：稍后再调 init 并回报结果。
+            wv.postDelayed({
+                val initScript =
+                    "try{(function(){if(!window.eruda)return 'no-eruda';" +
+                        "if(window.eruda._isInit)return 'already';" +
+                        "eruda.init({useShadowDom:true,defaultPanel:'console'});" +
+                        "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}" +
+                        "return 'inited';})()}catch(e){return 'error:'+(e&&e.message)}"
+                runCatching {
+                    wv.evaluateJavascript(initScript) { result ->
+                        logI("eruda init result: $result")
+                    }
+                }.onFailure { logI("injectEruda init failed: ${it.message}") }
+            }, 300L)
         }
     }
 
