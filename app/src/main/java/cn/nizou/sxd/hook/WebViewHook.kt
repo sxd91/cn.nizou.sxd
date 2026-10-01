@@ -18,6 +18,7 @@ import cn.nizou.sxd.util.Simian
 import cn.nizou.sxd.util.XposedHelpers
 import cn.nizou.sxd.util.currentApplication
 import cn.nizou.sxd.util.logI
+import cn.nizou.sxd.util.moduleStringRes
 import cn.nizou.sxd.util.pathPoints
 import cn.nizou.sxd.util.toJSONArray
 import io.github.libxposed.api.XposedInterface
@@ -298,7 +299,13 @@ class WebViewHook(
             // 「注入日志消失/JS 不注入」；任何失败都留痕。
             try {
                 // ★ H5 网页调试器（Eruda）：独立于答题模式，只要开关开着就注入。
-                if (PK.h5DebugConsole) injectEruda(loadUrl, webView)
+                //
+                // 真机踩坑（2026-10-01）：日志里**一次 eruda 都没有** —— 因为 prefs 里压根没有
+                // `h5_debug_console` 这个键（开关从未被写入，读到的就是默认 false）。
+                // 所以这里**无论开没开都打一行日志**，真机可直接确认「是开关没开」还是「注入了但失败」。
+                val erudaOn = PK.h5DebugConsole
+                logI("SimianV2 eruda: switch=$erudaOn (prefs key=${moduleStringRes.KEY_H5_DEBUG_CONSOLE})")
+                if (erudaOn) injectEruda(loadUrl, webView)
                 val mode = PK.mode
                 // 答题 JS 配置（mode/自定义答案/自定义正确题数），quick.js 读取；标准模式同样注入。
                 injectAaConfig(loadUrl, webView)

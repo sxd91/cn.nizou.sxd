@@ -120,19 +120,37 @@ internal object SimianV2PkAutomation {
         if (cancelled > 0) logI("SimianV2 stroke session cancelled: $cancelled ($reason)")
     }
 
-    /** 带重试的笔画提交：失败重复提交，不超过 retryMax 次，间隔 retryDelay 毫秒。 */
+    /**
+     * 带重试的笔画提交（**带节流**）。
+     *
+     * ## ★★ 2026-10-01 关键修复：重试过密会把 PK 答题页「打回主页」
+     *
+     * 真机现象：提交后 PK 页面直接退回 PK 主页。
+     *
+     * 真因：`submitStrokeOnce` 每次都会在页面里跑「扫全部模块候选 → 逐个 `System.import`」，
+     * 真机实测 `candidates=42`。而重试间隔默认只有 **20ms**，`retryMax` 默认 **10**
+     * （`quickSubmit` 时上限是 **2000**！）→ 一秒内发起几十次全量 import，
+     * 442 次 import 的 Promise 洪水把页面 JS 线程与网络栈打爆，
+     * 页面自身逻辑（心跳/路由）随之超时 → SPA 自己退回 `pk.html` 主页。
+     *
+     * 修法（三重节流，任意一条生效即停止重试）：
+     *  1. **最小重试间隔 [MIN_RETRY_DELAY_MS]**（默认 1500ms，配置值更小也不低于它）；
+     *  2. **全局重试上限 [MAX_TOTAL_ATTEMPTS]**（默认 6）—— 不管 `retryMax` 配多大；
+     *  3. **页面内候选探测只做一次**：第一次尝试后，把命中结果记忆在页面
+     *     `window.__aa_padCache`，后续 attempt 直接复用，不再重复 import 全量候选。
+     */
     private fun submitWithRetry(webView: WebView, index: Int, total: Int, attempt: Int, quick: Boolean) {
         if (!webView.isAttachedToWindow) return
+        if (attempt >= MAX_TOTAL_ATTEMPTS) {
+            logI("SimianV2 笔画提交 $index/$total 失败，已达全局重试上限 $MAX_TOTAL_ATTEMPTS（停止，避免打爆页面）")
+            return
+        }
         submitStrokeOnce(webView, index, total) { ok ->
             if (ok) return@submitStrokeOnce
-            val max = if (quick) 2000 else SimianV2AutomationPrefs.retryMax.coerceAtLeast(1)
-            if (attempt < max) {
-                val rd = if (quick) 150L else SimianV2AutomationPrefs.retryDelay.coerceAtLeast(0L)
-                logI("SimianV2 笔画提交 $index/$total 失败，重试 ${attempt + 1}/$max (间隔 ${rd}ms)")
-                handler.postDelayed({ submitWithRetry(webView, index, total, attempt + 1, quick) }, rd)
-            } else {
-                logI("SimianV2 笔画提交 $index/$total 失败，已达最大重试次数")
-            }
+            val configured = if (quick) 150L else SimianV2AutomationPrefs.retryDelay.coerceAtLeast(0L)
+            val rd = configured.coerceAtLeast(MIN_RETRY_DELAY_MS)
+            logI("SimianV2 笔画提交 $index/$total 失败，重试 ${attempt + 1}/$MAX_TOTAL_ATTEMPTS (间隔 ${rd}ms)")
+            handler.postDelayed({ submitWithRetry(webView, index, total, attempt + 1, quick) }, rd)
         }
     }
 
@@ -181,6 +199,10 @@ internal object SimianV2PkAutomation {
     };
 
     // ---------- 路线 A（SimianV2 同款）：动态 import 模块取 store.pad ----------
+    //
+    // ⚠️ 代价很高：真机 candidates=42，逐个 import 会产生大量 Promise。
+    // 所以**结果缓存到 window.__aa_padCache**，重试时不再重复 import 全量候选
+    // （否则重试会把页面 JS 线程打爆，SPA 自己退回主页 —— 真机已复现）。
     const padFrom = (m, where) => {
         if (!m) return null;
         let store = null;
@@ -190,36 +212,71 @@ internal object SimianV2PkAutomation {
         if (isPad(pad)) { status.via = where; return pad; }
         return null;
     };
+    /** 只取 store（不判 pad），供扫描阶段判断「这个模块有没有 pad 槽位」。 */
+    const inspect = m => {
+        if (!m) return null;
+        try { return (typeof m.d === 'function') ? m.d() : (m.default || null); } catch (e) { return null; }
+    };
+    const PAD_CACHE = window.__aa_padCache = window.__aa_padCache || {};
     const candidateUrls = () => {
         const urls = new Set();
+        // 只认 PK 答题页自己的资源目录，避免把别的服务的同名 chunk 也 import 进来。
+        const want = '/bh5/leo-web-oral-pk/assets/';
+        const ok = n => typeof n === 'string' && n.indexOf(want) >= 0 && n.slice(-3) === '.js';
         try {
             if (typeof System !== 'undefined' && typeof System.entries === 'function') {
-                System.entries().forEach((v, k) => {
-                    if (typeof k === 'string' && k.indexOf('leo-web-oral-pk') >= 0 && k.slice(-3) === '.js') urls.add(k);
-                });
+                System.entries().forEach((v, k) => { if (ok(k)) urls.add(k); });
             }
         } catch (e) {}
         try {
             performance.getEntriesByType('resource').forEach(e => {
                 const n = e && e.name ? e.name : '';
-                if (n.indexOf('leo-web-oral-pk') >= 0 && n.indexOf('/assets/') >= 0 && n.slice(-3) === '.js') urls.add(n);
+                if (ok(n)) urls.add(n);
             });
         } catch (e) {}
         return Array.from(urls);
     };
+    /**
+     * 取模块的 store（`m.d()`）。
+     *
+     * 命中策略（三级，越靠后代价越低）：
+     *  1. 先只试**已记住的模块**（上次扫描确认「store 上有 pad 槽位」的那个）——
+     *     重试时只 import 1 个，不再全量扫描；
+     *  2. 没记住才做**全量扫描**，并记下「store 上有 pad 键」的模块 URL；
+     *  3. 全量扫描过一遍仍无所获就置 `scanDone`，后续 attempt 不再重复扫描
+     *     （模块清单在同一页面生命周期内是静态的，重复扫没有新信息）。
+     */
     const tryImportRoute = async () => {
+        // 1) 只试记住的那个模块
+        if (PAD_CACHE.moduleUrl) {
+            try {
+                const m = await System.import(PAD_CACHE.moduleUrl);
+                const store = inspect(m);
+                const pad = store ? unref(store.pad) : null;
+                if (isPad(pad)) { status.via = 'cache:' + PAD_CACHE.moduleUrl.split('/').pop(); return pad; }
+            } catch (e) {}
+            status.cacheMiss = true;
+            return null;
+        }
+        // 3) 已扫过且没结果 —— 不再重复扫描（避免 Promise 洪水打爆页面）
+        if (PAD_CACHE.scanDone) { status.scanSkipped = true; return null; }
+
+        // 2) 全量扫描（每个页面生命周期只做一次）
         const urls = candidateUrls();
         status.candidates = urls.length;
+        PAD_CACHE.scanDone = true;
         for (const u of urls) {
             try {
-                const m = await System.import(u);
-                const pad = padFrom(m, 'import:' + u.split('/').pop());
-                if (pad) return pad;
+                const store = inspect(await System.import(u));
+                if (!store) continue;
+                const pad = unref(store.pad);
+                if (isPad(pad)) { PAD_CACHE.moduleUrl = u; status.via = 'import:' + u.split('/').pop(); return pad; }
+                // 记下「有 pad 槽位」的模块：画板可能稍后才填进这个 ref，重试时优先它。
+                if ('pad' in store) PAD_CACHE.moduleUrl = u;
             } catch (e) {}
         }
         return null;
     };
-
     // ---------- 路线 B（兜底）：遍历 Vue 组件树 / 全局 ----------
     let hitSeen = null;
     const scanInstance = (inst, depth) => {
@@ -351,4 +408,16 @@ internal object SimianV2PkAutomation {
         }
         webView.evaluateJavascript(script) { result -> logI("SimianV2 $action result: " + result) }
     }
+
+    /**
+     * 重试最小间隔。配置值比它小也按它走 —— 每次重试都会在页面里跑一遍
+     * 「候选模块 import」，间隔太小会把页面 JS 线程打爆（真机已验证会把 PK 页打回主页）。
+     */
+    private val MIN_RETRY_DELAY_MS = 1500L
+
+    /**
+     * 全局重试上限（不受 `simianv2_retry_max` 配置影响）。
+     * 旧行为在 quickSubmit 下上限是 2000，实测会把 PK 页面打回主页。
+     */
+    private val MAX_TOTAL_ATTEMPTS = 6
 }

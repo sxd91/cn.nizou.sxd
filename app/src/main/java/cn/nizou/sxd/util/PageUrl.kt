@@ -49,8 +49,12 @@ object PageUrl {
         val s = haystack(url)
         if (s.contains("animation-oral")) return true
         if (s.contains("english-words")) return false // 英语词卡是另一条链路
-        if (!s.contains("exercise") && !s.contains("oral-pk") && !s.contains("math-exercise")) return false
-        return s.contains("exercise") || s.contains("/pk.html")
+        // ★ 真机踩坑：`pk.html` 是 PK 的**外壳页**（含主页/匹配/答题等所有 SPA 状态）。
+        // 单看文件名会把 pk.html 误判成答题页，在主页就 scheduleStroke（真机日志已复现）。
+        // 只有 hash 路由里出现 exercise 才算答题态。
+        if (s.contains("/pk.html")) return hashRoute(url).contains("exercise")
+        return s.contains("exercise") &&
+            (s.contains("oral-pk") || s.contains("math-exercise"))
     }
 
     /** 是否为英语词卡页。 */
