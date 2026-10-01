@@ -1,7 +1,9 @@
 package cn.nizou.sxd.util
 
+import cn.nizou.sxd.XposedInit
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.StringMatchType
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -31,16 +33,88 @@ object DexKitLocator {
     /** DexKit 是否已就绪（bridge 已建）。调用方可据此判断「没命中」还是「没就绪」。 */
     fun isReady(): Boolean = bridge != null
 
+    /**
+     * 加载 DexKit native 库。
+     *
+     * ## ★★★ 2026-10-01 真因：`System.loadLibrary("dexkit")` 在宿主进程里**必然失败**
+     *
+     * 本模块是 LSPosed/npatch 模块，**被注入到宿主进程**里运行。
+     * `System.loadLibrary` 只会在**宿主**的 nativeLibraryDir / namespace 里找 ——
+     * 而 `libdexkit.so` 在**模块 APK** 里（`lib/arm64-v8a/libdexkit.so`），
+     * 宿主目录里根本没有 → 每次 init 都失败。
+     *
+     * 这解释了全部现象：日志里从来没有 `bridge created`，
+     * `dexKitReady` 永远是 false，`correct-answer` 永远 `matchers=0`。
+     *
+     * （同一根因 `Strokes.kt` 早已处理过：`libauto_oral.so` 也是「从模块 APK 解压再 load」。）
+     *
+     * ## 解压目标：`codeCacheDir`（不是 filesDir）
+     *
+     * Android 的 W^X 策略会拒绝 `dlopen` **可写**目录下的 so
+     * （`Attempt to load writable file`，本项目在老挂那边踩过）。
+     * `codeCacheDir` 在 app 私有目录下、可执行、且不需要 app 自写 —— 是官方推荐放
+     * 「运行期解压的 so」的位置。
+     */
+    private fun loadNative(): Boolean {
+        // 1) 先按常规试（某些框架会把模块 so 也加进 namespace）
+        if (runCatching { System.loadLibrary("dexkit") }.isSuccess) {
+            logI("DexKitLocator: loadLibrary(dexkit) ok")
+            return true
+        }
+        // 2) 从模块 APK 解压到 codeCacheDir 再 System.load
+        val so = extractDexKitSo() ?: return false
+        return runCatching {
+            System.load(so.absolutePath)
+            logI("DexKitLocator: System.load ok -> ${so.absolutePath}")
+            true
+        }.onFailure { logI("DexKitLocator: System.load failed: ${it.message}") }.getOrDefault(false)
+    }
+
+    /** 从模块 APK 的 `lib/<abi>/libdexkit.so` 解压到 `codeCacheDir`。 */
+    private fun extractDexKitSo(): File? = runCatching {
+        val ctx = currentApplication()
+        // 模块 APK 路径（onModuleLoaded 里已存好）
+        val moduleApk = XposedInit.modulePath
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+        val zip = java.util.zip.ZipFile(java.io.File(moduleApk))
+        try {
+            val entry = (zip.getEntry("lib/$abi/libdexkit.so")
+                ?: zip.getEntry("lib/arm64-v8a/libdexkit.so"))
+                ?: return@runCatching null
+            val dir = File(ctx.codeCacheDir, "dexkit").apply { mkdirs() }
+            val out = File(dir, "libdexkit.so")
+            val size = entry.size
+            if (out.exists() && out.length() == size) return@runCatching out
+            zip.getInputStream(entry).use { input ->
+                out.outputStream().use { it.write(input.readBytes()) }
+            }
+            out.setReadable(true, false)
+            out.setExecutable(true, false)
+            logI("DexKitLocator: extracted libdexkit.so -> ${out.absolutePath} (${out.length()}B)")
+            out
+        } finally {
+            runCatching { zip.close() }
+        }
+    }.onFailure { logI("DexKitLocator: extract libdexkit.so failed: ${it.message}") }.getOrNull()
+
     /** 用宿主 APK 路径初始化（幂等；线程安全）。失败返回 false 不抛。 */
     fun init(apkPath: String): Boolean {
         if (bridge != null) return true
         return runCatching {
-            // native 库必须先加载（DexKitBridge.create 内部依赖 JNI）
-            System.loadLibrary("dexkit")
-            val b = DexKitBridge.create(apkPath) ?: return false
-            bridge = b
-            logI("DexKitLocator: bridge created for $apkPath")
-            true
+            if (!loadNative()) {
+                logI("DexKitLocator: native lib unavailable, abort init")
+                false
+            } else {
+                val b = DexKitBridge.create(apkPath)
+                if (b == null) {
+                    logI("DexKitLocator: DexKitBridge.create returned null")
+                    false
+                } else {
+                    bridge = b
+                    logI("DexKitLocator: bridge created for $apkPath")
+                    true
+                }
+            }
         }.onFailure {
             logI("DexKitLocator init failed: ${it.message}")
         }.getOrDefault(false)

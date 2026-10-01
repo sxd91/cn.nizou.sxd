@@ -37,3 +37,33 @@ object LogBuffer {
     @Synchronized
     fun clear() = logs.clear()
 }
+
+/**
+ * 「真自定义分数」专属**运行日志**（独立于全局 LogBuffer）。
+ *
+ * ## 为什么单独一个
+ *
+ * 用户诉求（2026-10-01）：「真自定义分数应该有个运行日志框，就和逆向系老挂一样」。
+ * 刷分过程是多轮循环 + 频控退避，混在全量日志里根本看不清「第几轮、卡在哪一步」。
+ * 这里收**刷分链路自己的关键事件**（开始/出题/提交/入账/频控/结束），
+ * 供设置页实时滚动显示；同时也镜像进全局 [LogBuffer]（文件日志不受影响）。
+ *
+ * 容量比全局小（[CAPACITY]），因为只需要看最近几轮。
+ */
+object ScoreLog {
+    const val CAPACITY = 300
+
+    private val logs = ArrayDeque<String>()
+
+    @Synchronized
+    fun add(line: String) {
+        logs.addLast(line)
+        while (logs.size > CAPACITY) logs.removeFirst()
+    }
+
+    @Synchronized
+    fun snapshot(): List<String> = logs.toList()
+
+    @Synchronized
+    fun clear() = logs.clear()
+}

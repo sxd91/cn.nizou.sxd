@@ -1,6 +1,7 @@
 package cn.nizou.sxd.api
 
 import cn.nizou.sxd.util.SettingsPrefs
+import cn.nizou.sxd.util.ScoreLog
 import cn.nizou.sxd.util.XposedHelpers
 import cn.nizou.sxd.util.kotlinStrokesAt
 import cn.nizou.sxd.util.logI
@@ -78,6 +79,18 @@ object ScorePump {
     /** 请求停止当前 pumpToTarget 循环 */
     fun cancel() {
         stopped = true
+        spLog("用户请求停止")
+    }
+
+    /**
+     * 刷分链路日志：**同时**进「运行日志框」（[ScoreLog]）与全局日志（[logI]→文件）。
+     *
+     * 运行日志框只看这个链路，避免被宿主全量日志淹没（用户诉求）。
+     */
+    private fun spLog(msg: String) {
+        val line = "[${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}] $msg"
+        ScoreLog.add(line)
+        logI("ScorePump: $msg")
     }
 
     /**
@@ -103,7 +116,7 @@ object ScorePump {
                 arr.put(org.json.JSONObject().put("id", id).put("name", name).put("cnt", cnt))
             }
             SettingsPrefs.writeString(PREF_KEYPOINT_OPTIONS, arr.toString())
-        }.onFailure { logI("ScorePump: persist keypoints failed: ${it.message}") }
+        }.onFailure { spLog("persist keypoints failed: ${it.message}") }
     }
 
     /** 从 prefs 载入缓存的知识点列表（模块设置页跨进程读）。 */
@@ -159,7 +172,7 @@ object ScorePump {
     ) {
         // ★ 重入保护：已有循环在跑时直接拒绝（真机曾出现 4 个循环并发互相踩踏）。
         if (!running.compareAndSet(false, true)) {
-            logI("ScorePump: 拒绝启动 —— 已有刷分循环在跑（请先停止）")
+            spLog("拒绝启动 —— 已有刷分循环在跑（请先停止）")
             onDone(Result.failure(IllegalStateException("已有刷分任务在运行，请先点「停止刷分」")))
             return
         }
@@ -168,13 +181,13 @@ object ScorePump {
             var kp = keyPointId
             stopped = false
             try {
-                logI("ScorePump: 开始刷分 target=$target limit=$limit interval=${intervalMs}ms kp=${kp.ifBlank { "(自动)" }}")
+                spLog("开始刷分 target=$target limit=$limit interval=${intervalMs}ms kp=${kp.ifBlank { "(自动)" }}")
                 val initial = fetchCurrentScore()
                 if (initial < 0) {
                     onDone(Result.failure(IllegalStateException("无法读取当前分数（宿主 ApiService 未初始化？）")))
                     return@thread
                 }
-                logI("ScorePump: 起始分数 $initial")
+                spLog("起始分数 $initial")
                 onProgress(initial, 0)
                 if (initial >= target) {
                     onDone(Result.success(initial))
@@ -186,7 +199,7 @@ object ScorePump {
                         return@thread
                     }
                     // 与 pk-node 一致：出题 keypointId=.. limit=..
-                    logI("ScorePump: 出题 keypointId=$kp limit=$limit")
+                    spLog("出题 keypointId=$kp limit=$limit")
                     var examVO = fetchExam(kp, limit, 15000L)
                     if (examVO == null) {
                         // ★ 不再「取题失败就盲扫 1~32768」：
@@ -200,7 +213,7 @@ object ScorePump {
                             return@thread
                         }
                         onProgress(-1, rounds)
-                        logI("ScorePump: 未指定知识点，开始扫描（带 429 熔断，最多 $MAX_KEYPOINT_ID）")
+                        spLog("未指定知识点，开始扫描（带 429 熔断，最多 $MAX_KEYPOINT_ID）")
                         val scanned = scanValidKeypoint(limit)
                         if (scanned == null) {
                             onDone(Result.failure(IllegalStateException(
@@ -210,7 +223,7 @@ object ScorePump {
                         }
                         kp = scanned.first
                         examVO = scanned.second
-                        logI("ScorePump: keypoint switched to $kp, continue pumping")
+                        spLog("keypoint switched to $kp, continue pumping")
                     }
                     val examId = extractExamId(examVO)
                     if (examId.isNullOrBlank()) {
@@ -223,14 +236,14 @@ object ScorePump {
                     val kpName = runCatching { XposedHelpers.getObjectField(examVO, "keypoint") as? String ?: "" }
                         .getOrDefault("")
                     // 与 pk-node 一致：出题成功 examId=.. <知识点> 共 N 题（预计 +M 经验）
-                    logI("ScorePump: 出题成功 examId=$examId ${kpName.ifBlank { "-" }} 共 $questionCnt 题（预计 +${questionCnt * 2} 经验）")
+                    spLog("出题成功 examId=$examId ${kpName.ifBlank { "-" }} 共 $questionCnt 题（预计 +${questionCnt * 2} 经验）")
                     buildFullCorrect(examVO)
-                    logI("ScorePump: 提交（全对 $questionCnt/$questionCnt，含笔迹，costTime 300~450ms/题）")
+                    spLog("提交（全对 $questionCnt/$questionCnt，含笔迹，costTime 300~450ms/题）")
                     if (!upload(examId, examVO)) {
                         // ★ 上传失败（真机上是 HTTP 400 / 429）**不能当作「又完成一轮」继续冲**：
                         //   继续冲只会把频控窗口越踩越深。这里退避后结束本轮，把决定权交回用户。
                         val backoff = UPLOAD_FAIL_BACKOFF_MS
-                        logI("ScorePump: 上传失败，退避 ${backoff}ms 后停止本轮（已刷 $rounds 局）")
+                        spLog("上传失败，退避 ${backoff}ms 后停止本轮（已刷 $rounds 局）")
                         Thread.sleep(backoff)
                         onDone(Result.failure(IllegalStateException(
                             "上传第 ${rounds + 1} 局失败（400/429，疑似频控），已刷 $rounds 局；请稍后再试"
@@ -239,10 +252,10 @@ object ScorePump {
                     }
                     rounds++
                     val cur = fetchCurrentScore()
-                    logI("ScorePump: 第 $rounds 局完成，服务端当前分数=${if (cur >= 0) cur else "读取失败"}")
+                    spLog("第 $rounds 局完成，服务端当前分数=${if (cur >= 0) cur else "读取失败"}")
                     onProgress(if (cur >= 0) cur else initial, rounds)
                     if (cur >= target) {
-                        logI("ScorePump: 达成目标（$cur >= $target），共 $rounds 局")
+                        spLog("达成目标（$cur >= $target），共 $rounds 局")
                         onDone(Result.success(cur))
                         return@thread
                     }
@@ -255,7 +268,7 @@ object ScorePump {
             } finally {
                 // ★ 无论成功/失败/停止，都要释放重入标志（否则用户再也点不动「开始」）。
                 running.set(false)
-                logI("ScorePump: 本轮结束（rounds=$rounds）")
+                spLog("本轮结束（rounds=$rounds）")
             }
         }
     }
@@ -271,7 +284,7 @@ object ScorePump {
             val v = runCatching { XposedHelpers.getObjectField(examVO, field) }.getOrNull()
             val s = v?.toString()?.trim()
             if (!s.isNullOrBlank() && s != "null" && s != "0") {
-                logI("ScorePump: examId from field `$field` = $s")
+                spLog("examId from field `$field` = $s")
                 return s
             }
         }
@@ -328,10 +341,10 @@ object ScorePump {
                 XposedHelpers.setIntField(bean, "answer", 1)
                 XposedHelpers.setIntField(bean, "showReductionFraction", 0)
                 XposedHelpers.setObjectField(q, "curTrueAnswer", bean)
-                logI("ScorePump: curTrueAnswer set for q$idx (recognizeResult=$answer)")
+                spLog("curTrueAnswer set for q$idx (recognizeResult=$answer)")
             }.onFailure { e ->
                 // 类名随版本可能不同：退化为「直接按 JSON 字符串塞字段」。
-                logI("ScorePump: CurTrueAnswerVO bean unavailable (${e.message}), fallback to map")
+                spLog("CurTrueAnswerVO bean unavailable (${e.message}), fallback to map")
                 runCatching {
                     val map = HashMap<String, Any>()
                     map["recognizeResult"] = answer
@@ -339,7 +352,7 @@ object ScorePump {
                     map["answer"] = 1
                     map["showReductionFraction"] = 0
                     XposedHelpers.setObjectField(q, "curTrueAnswer", map)
-                }.onFailure { logI("ScorePump: curTrueAnswer fallback failed: ${it.message}") }
+                }.onFailure { spLog("curTrueAnswer fallback failed: ${it.message}") }
             }
             totalTime += perQuestionCost
         }
@@ -357,11 +370,11 @@ object ScorePump {
             latch.countDown()
         }
         if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-            logI("ScorePump: getExamInfo timeout (kp=$keyPointId)")
+            spLog("getExamInfo timeout (kp=$keyPointId)")
             return null
         }
         if (err != null) {
-            logI("ScorePump: getExamInfo failed (kp=$keyPointId): ${err.message}")
+            spLog("getExamInfo failed (kp=$keyPointId): ${err.message}")
             return null
         }
         return exam
@@ -385,12 +398,12 @@ object ScorePump {
             val exam = fetchExam(id.toString(), limit, SCAN_TIMEOUT_MS)
             if (exam != null) {
                 SettingsPrefs.writeString("custom_score_keypoint", id.toString())
-                logI("ScorePump: valid keypoint found: $id")
+                spLog("valid keypoint found: $id")
                 return id.toString() to exam
             }
             streak++
             if (streak >= SCAN_ABORT_STREAK) {
-                logI("ScorePump: 连续 $streak 个知识点取题失败，判定为频控，停止扫描（避免加深惩罚）")
+                spLog("连续 $streak 个知识点取题失败，判定为频控，停止扫描（避免加深惩罚）")
                 return null
             }
             if (SCAN_STEP_DELAY_MS > 0) Thread.sleep(SCAN_STEP_DELAY_MS)
@@ -408,19 +421,19 @@ object ScorePump {
             latch.countDown()
         }
         if (!latch.await(15, TimeUnit.SECONDS)) {
-            logI("ScorePump: upload timeout")
+            spLog("upload timeout")
             return false
         }
         if (err != null) {
-            logI("ScorePump: upload failed: ${err.message}")
+            spLog("upload failed: ${err.message}")
             return false
         }
         // 与 pk-node 一致：提交成功：服务端判对 X/Y，经验 +Z
         runCatching {
             val correct = XposedHelpers.getIntField(resp!!, "correctCnt")
             val total = XposedHelpers.getIntField(resp!!, "questionCnt")
-            logI("ScorePump: 提交成功：服务端判对 $correct/$total，经验 +${correct * 2}")
-        }.onFailure { logI("ScorePump: 提交成功（响应无法解析 correctCnt，不影响计分）") }
+            spLog("提交成功：服务端判对 $correct/$total，经验 +${correct * 2}")
+        }.onFailure { spLog("提交成功（响应无法解析 correctCnt，不影响计分）") }
         return ok
     }
 
@@ -435,11 +448,11 @@ object ScorePump {
             latch.countDown()
         }
         if (!latch.await(15, TimeUnit.SECONDS)) {
-            logI("ScorePump: pre-fetch timeout")
+            spLog("pre-fetch timeout")
             return -1
         }
         if (err != null) {
-            logI("ScorePump: pre-fetch failed: ${err.message}")
+            spLog("pre-fetch failed: ${err.message}")
             return -1
         }
         return score

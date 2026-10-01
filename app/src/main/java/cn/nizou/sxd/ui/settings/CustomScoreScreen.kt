@@ -1,13 +1,21 @@
 package cn.nizou.sxd.ui.settings
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -34,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import cn.nizou.sxd.api.LegacyApiService
 import cn.nizou.sxd.api.OralApiService
 import cn.nizou.sxd.api.ScorePump
+import cn.nizou.sxd.util.ScoreLog
 import cn.nizou.sxd.util.SettingsPrefs
 import cn.nizou.sxd.util.XposedHelpers
 import cn.nizou.sxd.util.logI
@@ -434,6 +443,9 @@ fun CustomScoreScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
+                // ★ 运行日志框：实时显示刷分链路（对齐老挂的日志区）。
+                //   每 400ms 拉一次 ScoreLog；列表用 LazyColumn + 自动跟随到底部。
+                ScoreRunLogBox(pumping)
                 Text(
                     text = "说明：循环「取卷子→全对→上传（/leo-math/android/exams/v2）」刷分，与「自动上分」同链路，" +
                         "无登录参与接口的每天 3 次限制。知识点 ID 可留空——取题失败会自动从 1 遍历到 2^15(32768) " +
@@ -450,6 +462,85 @@ fun CustomScoreScreen(onBack: () -> Unit) {
                     else MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium
                 )
+            }
+        }
+    }
+}
+
+/**
+ * 「真自定义分数」运行日志框（对齐老挂日志区：自动跟随到底部）。
+ *
+ * - 每 400ms 从 ScoreLog 拉快照（刷分在工作线程跑，轮询最简单可靠）；
+ * - 新日志到来时自动滚到底；用户上滑查看历史时暂停跟随，滑回底部恢复；
+ * - 顶部工具条：标题 + 条数 + 清空。
+ */
+@Composable
+private fun ScoreRunLogBox(running: Boolean) {
+    var lines by remember { mutableStateOf(ScoreLog.snapshot()) }
+    var autoFollow by remember { mutableStateOf(true) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(running) {
+        while (true) {
+            lines = ScoreLog.snapshot()
+            kotlinx.coroutines.delay(400)
+        }
+    }
+
+    LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow { listState.layoutInfo }
+            .collect { info ->
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                autoFollow = last >= info.totalItemsCount - 2
+            }
+    }
+
+    LaunchedEffect(lines.size, autoFollow) {
+        if (autoFollow && lines.isNotEmpty()) {
+            listState.animateScrollToItem(lines.size - 1)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("运行日志", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "  ${lines.size} 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Box(Modifier.weight(1f))
+            OutlinedButton(onClick = { ScoreLog.clear(); lines = emptyList() }) { Text("清空") }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 120.dp, max = 260.dp)
+                .background(
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    RoundedCornerShape(10.dp)
+                )
+                .padding(8.dp)
+        ) {
+            if (lines.isEmpty()) {
+                Text(
+                    "（暂无日志：点「开始刷到目标分数」后这里会实时显示每一轮）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(state = listState) {
+                    itemsIndexed(lines) { _, line ->
+                        Text(
+                            text = line,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                        )
+                    }
+                }
             }
         }
     }
