@@ -16,6 +16,7 @@
     <string name="key_pk_fast_settle">pk_fast_settle</string>
     <string name="key_pk_skip_ranking">pk_skip_ranking</string>
     <string name="key_pk_settle_enabled">pk_settle_enabled</string>
+    <string name="key_h5_debug_console">h5_debug_console</string>
     <string name="key_custom_question_count">custom_question_count</string>
     <string name="key_github">github</string>
     <string name="key_version">version</string>

@@ -127,6 +127,14 @@ object UserInfoStore {
             }
             // 账号列表：subUserInfos.project2SubUserInfo.<project>.subUserIds（accounts/current 返回）
             collectSubAccounts(json)
+            // ★★ 2026-10-01：**列表型**响应 —— 小号名字/头像的真来源。
+            //
+            // `batchGet`（`/leo-profile/android/user-infos/batchGet`）与
+            // `user-infos` 列表接口返回的是**数组**（每个子账号一个对象），
+            // 而上面的 `pick()` 只从**顶层对象**取单个用户 → 数组完全取不到 →
+            // 「小号头像和名字」永远显示占位。这里把数组逐项解析。
+            collectUserArray(json)
+            collectUserArray(json.optJSONObject("data"))
             // 字段名多版本兼容：userName/nickName/nickname/name；avatarUrl/headUrl/avatar/headImg；userId/userid/id
             //（2026-08-29 真机抓包：/leo-profile/android/user-infos 返回 nickname(小写n) 而非 nickName）
             val name = pick("userName").ifBlank { pick("nickName") }.ifBlank { pick("nickname") }.ifBlank { pick("name") }
@@ -169,6 +177,79 @@ object UserInfoStore {
                 }
             }
             if (ids.isNotEmpty()) saveSubIds(ids.toList())
+        }
+    }
+
+    /**
+     * 解析**列表型**用户响应（数组，每项一个子账号）。
+     *
+     * ★★ 2026-10-01 新增 —— 修复「小号头像和名字取不到」。
+     *
+     * `batchGet`（`/leo-profile/android/user-infos/batchGet`）等接口返回的是
+     * **数组**；旧实现只从顶层对象 `pick(...)` 取单个用户，数组项完全取不到，
+     * 于是子账号卡片永远只有 uid、没有名字/头像。
+     *
+     * 这里把数组里每一项当独立用户解析（字段名多版本兼容），
+     * 写入 `ui_profiles`（按 uid 存 name/avatar），供 [accounts] 渲染。
+     *
+     * 同时兼容「对象里套数组」的常见包装：`data` / `userInfos` / `list` / `items`。
+     */
+    private fun collectUserArray(json: JSONObject?) {
+        val obj = json ?: return
+        runCatching {
+            val arrays = listOfNotNull(
+                obj.optJSONArray("data"),
+                obj.optJSONArray("userInfos"),
+                obj.optJSONArray("userInfoList"),
+                obj.optJSONArray("list"),
+                obj.optJSONArray("items"),
+                // batchGet 有时把数组直接挂在顶层（无包装）
+                if (obj.has("userId") || obj.has("userid")) null else null,
+            )
+            for (arr in arrays) {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    ingestUserObject(item)
+                }
+            }
+            // 顶层本身就是「一个用户对象」的情况也走一遍（幂等）
+            if (obj.has("userId") || obj.has("userid") || obj.has("nickname") || obj.has("nickName")) {
+                ingestUserObject(obj)
+            }
+        }
+    }
+
+    /**
+     * 从**单个用户对象**取 uid/name/avatar 并落库（不覆盖已有非空值）。
+     *
+     * 字段名多版本兼容，与 [updateFromJson] 的同名逻辑保持一致：
+     *  - 名字：`userName` / `nickName` / `nickname` / `name`
+     *  - 头像：`avatarUrl` / `headUrl` / `avatar` / `headImg` / `portrait`
+     *  - uid：`userId` / `userid` / `id` / `uid`
+     *  - 支持一层包装：`baseUserInfoVO` / `userInfo`
+     */
+    private fun ingestUserObject(item: JSONObject) {
+        val scopes = buildList {
+            add(item)
+            item.optJSONObject("baseUserInfoVO")?.let { add(it) }
+            item.optJSONObject("userInfo")?.let { add(it) }
+        }
+        fun pickAny(vararg keys: String): String {
+            for (s in scopes) for (k in keys) {
+                val v = s.optString(k, "")
+                if (v.isNotBlank() && v != "null") return v
+            }
+            return ""
+        }
+        val uid = pickAny("userId", "userid", "uid", "id")
+        val name = pickAny("userName", "nickName", "nickname", "name")
+        val avatar = pickAny("avatarUrl", "headUrl", "avatar", "headImg", "portrait")
+        if (uid.isBlank()) return
+        addToSubIds(uid)
+        // 只有真的有名字/头像才写入，避免用空值覆盖已采集到的资料。
+        if (name.isNotBlank() || avatar.isNotBlank()) {
+            saveProfile(uid, name, avatar)
+            logI("UserInfoStore ingest: uid=$uid name=$name avatar=${avatar.take(40)}")
         }
     }
 

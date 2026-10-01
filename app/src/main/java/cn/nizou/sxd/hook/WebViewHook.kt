@@ -58,6 +58,44 @@ class WebViewHook(
             .bufferedReader().use { it.readText() }
     }
 
+    /**
+     * H5 网页调试器（Eruda）—— 逆向系老叟同款。
+     *
+     * 仅在 [PK.h5DebugConsole] 开启时才会被读取/注入。
+     * ⚠️ 单例懒加载：474KB 的脚本，只在用户真正开启时才读盘。
+     */
+    private val erudaJs by lazy {
+        moduleRes.assets.open("js/eruda.js")
+            .bufferedReader().use { it.readText() }
+    }
+
+    /**
+     * 注入 Eruda 面板：**两步** —— 先注入脚本，再调 `eruda.init()`。
+     *
+     * ## 为什么要两步
+     *
+     * `eruda.js` 只是把 `window.eruda` 挂上去；**不调 `init()` 不会浮面板**。
+     *
+     * ## 为什么加 `_isInit` 守卫
+     *
+     * 同一次页面加载 `onPageFinished` 可能回调多次（含 iframe），
+     * 重复 `init()` 会叠出多个面板。所以先探一下 `eruda._isInit`。
+     */
+    private fun injectEruda(loadUrl: Method, webView: View) {
+        try {
+            injectJsCode(erudaJs, loadUrl, webView)
+            injectJsCode(
+                "if(window.eruda&&!window.eruda._isInit){eruda.init({useShadowDom:true,defaultPanel:'console'});" +
+                    "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}}",
+                loadUrl,
+                webView,
+            )
+            logI("eruda (H5 调试器) injected")
+        } catch (e: Throwable) {
+            logI("injectEruda failed: ${e.message}")
+        }
+    }
+
     private val pkPageLoaded = AtomicBoolean(false)
 
 
@@ -240,6 +278,8 @@ class WebViewHook(
             // 2026-08-29：整体 try-catch，防止任一环节异常（如 PK.mode 越界）吞掉注入导致
             // 「注入日志消失/JS 不注入」；任何失败都留痕。
             try {
+                // ★ H5 网页调试器（Eruda）：独立于答题模式，只要开关开着就注入。
+                if (PK.h5DebugConsole) injectEruda(loadUrl, webView)
                 val mode = PK.mode
                 // 答题 JS 配置（mode/自定义答案/自定义正确题数），quick.js 读取；标准模式同样注入。
                 injectAaConfig(loadUrl, webView)

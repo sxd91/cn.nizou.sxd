@@ -146,6 +146,15 @@ object PK {
         get() = kotlin.runCatching {
             Integer.parseInt(modulePrefs.getString("pk_cyclic_mode", "1")!!)
         }.getOrElse { 1 }
+
+    /**
+     * H5 网页调试器（Eruda）—— 逆向系老叟同款。
+     *
+     * 开启后每次 H5 页面加载都会注入移动端 DevTools 面板（Console / Network /
+     * Elements / Storage / Sources）。默认关：它会浮一个面板挡住页面。
+     */
+    val h5DebugConsole
+        get() = modulePrefs.getBoolean(moduleStringRes.KEY_H5_DEBUG_CONSOLE, false)
 }
 
 /** SimianV2 automation keeps quick answer and each result-page action independently configurable. */

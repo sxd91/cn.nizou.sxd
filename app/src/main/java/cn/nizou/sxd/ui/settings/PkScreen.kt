@@ -31,6 +31,7 @@ fun PkScreen(res: StringRes, onBack: () -> Unit) {
     }
     var loopPk by remember { mutableStateOf(SettingsPrefs.readBoolean(res, res.KEY_PK_CYCLIC, false)) }
     var loopInterval by remember { mutableStateOf(SettingsPrefs.readString(res, res.KEY_PK_CYCLIC_INTERVAL, "1500")) }
+    var h5Debug by remember { mutableStateOf(SettingsPrefs.readBoolean(res, res.KEY_H5_DEBUG_CONSOLE, false)) }
 
     M3ListScaffold(title = "PK 自动化", navigationIcon = { M3BackButton(onClick = onBack) }) {
         item {
@@ -60,6 +61,20 @@ fun PkScreen(res: StringRes, onBack: () -> Unit) {
                     title = "循环间隔", value = loopInterval, placeholder = "单位毫秒，默认值 1500", enabled = loopPk,
                     keyboardType = KeyboardType.Number, filter = { value -> value.filter(Char::isDigit) },
                     onValueChange = { loopInterval = it; SettingsPrefs.writeString(res, res.KEY_PK_CYCLIC_INTERVAL, it) },
+                )
+            }
+        }
+        item {
+            SegmentedColumn(title = "H5 调试器") {
+                SwitchWidget(
+                    title = "注入网页调试器（Eruda）",
+                    description = "每次打开 H5 页面注入移动端 DevTools：Console / Network / Elements / Storage。" +
+                        "排障用，会浮一个面板挡住页面，平时请关闭。",
+                    checked = h5Debug,
+                    onCheckedChange = {
+                        h5Debug = it
+                        SettingsPrefs.writeBoolean(res, res.KEY_H5_DEBUG_CONSOLE, it)
+                    },
                 )
             }
         }
