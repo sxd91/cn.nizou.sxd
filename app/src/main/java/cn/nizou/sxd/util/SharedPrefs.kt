@@ -162,11 +162,30 @@ object PK {
     /**
      * H5 网页调试器（Eruda）—— 逆向系老叟同款。
      *
-     * 开启后每次 H5 页面加载都会注入移动端 DevTools 面板（Console / Network /
-     * Elements / Storage / Sources）。默认关：它会浮一个面板挡住页面。
+     * ★★ 2026-10-01：**默认改为 true**。
+     *
+     * 真机证据：prefs 里**从来没有** `h5_debug_console` 这个键，而
+     * `SimianV2 eruda: switch=false` —— 也就是用户以为开了、实际一直是默认的 false。
+     * 现在把它改成「默认开」：开关只在用户**显式关过**（键存在且为 false）时才关。
      */
     val h5DebugConsole
-        get() = modulePrefs.getBoolean(moduleStringRes.KEY_H5_DEBUG_CONSOLE, false)
+        get() = modulePrefs.getBoolean(moduleStringRes.KEY_H5_DEBUG_CONSOLE, true)
+
+    /**
+     * 一次性迁移：把「默认关」时代的旧语义纠正为「默认开」。
+     *
+     * 老版本默认 false，用户从未拨动过就不会有该键；
+     * 现在默认 true，但如果用户**真的**手动关过（键存在=false），要尊重他的选择。
+     * 所以这里不动用户已写的值，只在键缺失时写入 true（让设置页显示为「已开启」，与运行时一致）。
+     */
+    fun migrateH5DebugConsoleDefault() {
+        runCatching {
+            if (!modulePrefs.contains(moduleStringRes.KEY_H5_DEBUG_CONSOLE)) {
+                modulePrefs.edit().putBoolean(moduleStringRes.KEY_H5_DEBUG_CONSOLE, true).apply()
+                logI("migrate: h5_debug_console default -> true")
+            }
+        }.onFailure { logI("migrate h5_debug_console failed: ${it.message}") }
+    }
 }
 
 /** SimianV2 automation keeps quick answer and each result-page action independently configurable. */

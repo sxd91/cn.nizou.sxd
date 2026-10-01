@@ -92,17 +92,22 @@ class WebViewHook(
      * 便于真机直接判断卡在哪一步。
      */
     private fun injectEruda(loadUrl: Method, webView: View) {
-        val wv = webView as? android.webkit.WebView ?: run {
-            logI("injectEruda skipped: view is not a WebView")
-            return
-        }
-        wv.post {
+        webView.post {
+            // ★ 用**反射**调 evaluateJavascript，不要 `as android.webkit.WebView`：
+            // 宿主用的是腾讯 X5（`com.tencent.smtt.sdk.WebView`，见 APK 里的 app_tbs_64），
+            // 它不是 `android.webkit.WebView` 的子类 → 直接强转会 ClassCastException，
+            // 而被外层 runCatching 吞掉 → 「日志说 injected、页面毫无反应」。
+            val eval = findEvaluateJavascript(webView)
+            if (eval == null) {
+                logI("injectEruda: evaluateJavascript not found on ${webView.javaClass.name}")
+                return@post
+            }
             runCatching {
-                wv.evaluateJavascript(erudaJs, null)
+                eval.invoke(webView, erudaJs, null)
             }.onFailure { logI("injectEruda script failed: ${it.message}") }
 
             // 脚本注入是异步的：稍后再调 init 并回报结果。
-            wv.postDelayed({
+            webView.postDelayed({
                 val initScript =
                     "try{(function(){if(!window.eruda)return 'no-eruda';" +
                         "if(window.eruda._isInit)return 'already';" +
@@ -110,15 +115,36 @@ class WebViewHook(
                         "try{eruda.get('console').config.set('displayTimestamps',true);}catch(e){}" +
                         "return 'inited';})()}catch(e){return 'error:'+(e&&e.message)}"
                 runCatching {
-                    wv.evaluateJavascript(initScript) { result ->
+                    eval.invoke(webView, initScript, android.webkit.ValueCallback<String> { result ->
                         logI("eruda init result: $result")
-                    }
+                    })
                 }.onFailure { logI("injectEruda init failed: ${it.message}") }
             }, 300L)
         }
     }
 
+    /**
+     * 反射找 `evaluateJavascript(String, ValueCallback)`。
+     *
+     * 兼容系统 `android.webkit.WebView` 与腾讯 X5 `com.tencent.smtt.sdk.WebView`
+     * —— 两者是**平行**类型，不能互相强转。
+     */
+    private fun findEvaluateJavascript(view: View): Method? {
+        val cached = evalMethodCache
+        if (cached != null && cached.declaringClass.isInstance(view)) return cached
+        return runCatching {
+            view.javaClass.methods.firstOrNull {
+                it.name == "evaluateJavascript" && it.parameterCount == 2 &&
+                    it.parameterTypes[0] == String::class.java
+            }?.also { it.isAccessible = true; evalMethodCache = it }
+        }.getOrNull()
+    }
+
     private val pkPageLoaded = AtomicBoolean(false)
+
+    /** `evaluateJavascript` 方法缓存（系统 WebView 与 X5 各一份，按实例类型校验）。 */
+    @Volatile
+    private var evalMethodCache: Method? = null
 
 
 

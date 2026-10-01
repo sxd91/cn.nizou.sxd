@@ -115,15 +115,17 @@ class XposedInit : XposedModule() {
                 val r = chain.proceed()
                 try {
                     // ★★ 最先做：禁止 npatch「内置」（把模块编译进宿主 APK）。
-                    // 判据 = 外层 manifest 的 appComponentFactory 被 npatch 的
-                    // `top.nkbe.npatch.metaloader.LSPAppComponentFactoryStub` 占用（真机取证）。
-                    // 命中即中止宿主；只允许 npatch 注入模式运行。默认开（Common.blockNPatchEmbed）。
+                    // 判据 = manifest 被声明成 xposed 模块（xposedmodule=true）或宿主 APK 内带内置模块。
+                    // 命中即中止宿主；只允许 npatch 注入/修补模式运行。强制开启（Common.blockNPatchEmbed）。
                     runCatching {
                         val hostApp = chain.thisObject as? android.app.Application
                         if (cn.nizou.sxd.util.NPatchGuard.enforceOrKill(hostApp)) {
                             return@intercept r
                         }
                     }.onFailure { Log.e("AutoOral", "NPatchGuard check failed", it) }
+                    // 一次性迁移：把 h5_debug_console 的旧默认值（false）纠正为 true（Eruda 默认开）。
+                    runCatching { cn.nizou.sxd.util.PK.migrateH5DebugConsoleDefault() }
+                        .onFailure { Log.e("AutoOral", "migrate h5 debug console failed", it) }
                     BaseHook.startHook(this, appClassLoader)
                     // （sign 白盒/native 探针已移除：native inline hook（shadowhook 挂
                     //  libRequestEncoder.so）实测会把宿主搞崩（MMKV UnsatisfiedLinkError / SIGSEGV），
@@ -160,14 +162,35 @@ class XposedInit : XposedModule() {
                     appContext?.let { cn.nizou.sxd.util.LogOverlayWindow.install(it) }
                     // Start/show DexKit at the first resumed host Activity. Creation can occur before
                     // callbacks are registered on several hosts, while resumed is always observed.
+                    // ★★ DexKit 启动：**不要**等 Activity onResume。
+                    //
+                    // 真机证据（2026-10-01）：日志里**一条 DexKit 日志都没有**
+                    // （既无 "bridge created" 也无 "init failed"），而
+                    // `SimianV2 correct-answer: attempt#2..10 dexKitReady=false` 一路到放弃
+                    // —— 说明 `DexKitCoordinator.start()` 压根没被调用，
+                    // 因为它在 `onActivityResumed` 里，而该回调在本宿主上没跑到。
+                    //
+                    // 改成在 `Application.attach` 里立即启动（此时已有 ApplicationInfo.sourceDir），
+                    // 并**显式打日志**，真机可确认 DexKit 到底起没起。
                     val dexKitStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+                    runCatching {
+                        val ctx = chain.thisObject as? android.content.Context
+                        val apkPath = ctx?.applicationInfo?.sourceDir
+                        log(Log.INFO, "AutoOral", "DexKit: bootstrap from attach, apkPath=$apkPath")
+                        if (apkPath != null && dexKitStarted.compareAndSet(false, true)) {
+                            DexKitCoordinator.start(apkPath)
+                        }
+                    }.onFailure { Log.e("AutoOral", "DexKit bootstrap failed", it) }
                     appContext?.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
                         override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
                         override fun onActivityStarted(activity: Activity) = Unit
                         override fun onActivityResumed(activity: Activity) {
-                            if (!dexKitStarted.compareAndSet(false, true)) return
-                            val apkPath = activity.applicationInfo.sourceDir
-                            DexKitCoordinator.start(apkPath)
+                            // 兜底：若 attach 阶段没拿到 apkPath，这里再补一次（只显示进度弹窗）。
+                            if (dexKitStarted.compareAndSet(false, true)) {
+                                val apkPath = activity.applicationInfo.sourceDir
+                                log(Log.INFO, "AutoOral", "DexKit: bootstrap from onActivityResumed, apkPath=$apkPath")
+                                DexKitCoordinator.start(apkPath)
+                            }
                             activity.window.decorView.postDelayed({
                                 DexKitHostProgressDialog.show(activity)
                             }, 180L)
