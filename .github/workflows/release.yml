@@ -46,7 +46,39 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      # ---- 版本解析（2026-08-30 用户要求：CI 不再 bump，只有 release 才升级版本号）----
+      # ---- Rust native（笔迹库）：**签名包必须自带**，否则 APK 缺
+      #   `lib/arm64-v8a/libauto_oral_strokes.so`，运行时笔迹功能直接失效。
+      #   （同 pk-node 「发布包缺 bin/start.js」那类事故，别再犯。）
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Build .so for arm64-v8a
+        run: |
+          set -euo pipefail
+          cargo install cargo-ndk --locked
+          NDK_DIR=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* 2>/dev/null | sort -V | tail -1)
+          test -n "$NDK_DIR" || { echo "ERROR: 未找到 Android NDK"; exit 1; }
+          export ANDROID_NDK_HOME="$NDK_DIR"
+          echo "NDK=$NDK_DIR"
+          (cd rust && cargo test --quiet)
+          (cd rust && cargo ndk -t arm64-v8a -o ../app/src/main/jniLibs build --release)
+          SO=app/src/main/jniLibs/arm64-v8a/libauto_oral_strokes.so
+          test -f "$SO" || { echo "ERROR: 未产出 $SO"; exit 1; }
+          # ⚠️ 必须 `-W`：`readelf -d --dyn-syms` 会按终端宽度**截断**长符号名，
+          #    导致 grep 误报缺符号（so 其实是好的）。详见 ci.yml 同处注释。
+          readelf -Wd --dyn-syms "$SO" | grep -q 'Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes' \
+            || { echo "ERROR: 缺少 JNI 导出符号"; exit 1; }
+          echo "OK: libauto_oral_strokes.so 就绪（$(stat -c%s "$SO") bytes）"
       # tag（v1.8.0 → versionName 1.8.0 / code 10800）；
       # workflow_dispatch：当前 version.properties +1 作为本次发布版本（失败则不提交，
       # 见 bump-version job —— 仅发布成功后执行，重试仍构建同一新版本，幂等）。
@@ -96,8 +128,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist/apk dist/mapping
 
-          # 本模块 universal APK 应包含全部 4 个 ABI（arm64-v8a/armeabi-v7a/x86/x86_64）
-          expected_abis="arm64-v8a armeabi-v7a x86 x86_64"
+          # ★★ 2026-10-01 修正：期望 ABI 从「4 个」改为 **arm64-v8a 一个**。
+          #
+          # `app/build.gradle.kts` 的 `ndk { abiFilters += listOf("arm64-v8a") }` 只打 arm64
+          # （宿主设备就是 arm64）。旧检查却硬要求 4 个 ABI —— 这是**必然误报**，
+          # 且会挡住所有 release（同理：笔迹 so 只在 arm64-v8a 下产出）。
+          # 如需重新支持多 ABI：改 gradle 的 abiFilters，并把这里同步改回来。
+          expected_abis="arm64-v8a"
 
           for apk in app/build/outputs/apk/release/*.apk; do
             test -f "$apk"
@@ -111,6 +148,10 @@ jobs:
               echo "::error file=$apk::ABI mismatch. Expected [$expected_abis], got [$actual_abis]"
               exit 1
             fi
+
+            # ★ 门禁：Rust 笔迹 so 必须在签名包里（否则用户装上后笔迹功能直接失效）。
+            unzip -Z1 "$apk" | grep -q 'lib/arm64-v8a/libauto_oral_strokes.so' \
+              || { echo "::error file=$apk::APK 内缺少 libauto_oral_strokes.so"; exit 1; }
 
             cp -v "$apk" dist/apk/
           done

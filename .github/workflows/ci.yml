@@ -75,8 +75,15 @@ jobs:
           echo "size: $(stat -c%s "$SO") bytes"
           # ★ 门禁：必须导出 Kotlin `external` 声明对应的那个符号，
           #   否则运行时就是 UnsatisfiedLinkError（这正是我们要修的东西）。
-          readelf -d --dyn-syms "$SO" | grep -q 'Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes' \
+          #
+          # ⚠️ 2026-10-01 踩坑：`readelf -d --dyn-syms` **会按终端宽度截断长符号名**
+          #   （CI 上输出成了 `Java_cn_nizou_sx[...]`），导致 grep 永远匹配不到、
+          #   门禁误报「缺少导出符号」，而 so 本身是好的。
+          #   必须加 `-W`（宽模式，不截断）；`nm -D` 亦不会截断，作为双保险。
+          readelf -Wd --dyn-syms "$SO" | grep -q 'Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes' \
             || { echo "ERROR: 缺少 JNI 导出符号 Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes"; exit 1; }
+          nm -D --defined-only "$SO" | grep -q 'Java_cn_nizou_sxd_util_StrokesKt_getNativeStrokes' \
+            || { echo "ERROR: (nm) 缺少 JNI 导出符号"; exit 1; }
           echo "OK: JNI 导出符号存在"
       - name: Upload rust lib
         uses: actions/upload-artifact@v4
