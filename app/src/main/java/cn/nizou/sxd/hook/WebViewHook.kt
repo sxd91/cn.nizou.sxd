@@ -12,6 +12,7 @@ import cn.nizou.sxd.entities.AutoAnswerMode
 import cn.nizou.sxd.util.AnswerCache
 import cn.nizou.sxd.util.Debug
 import cn.nizou.sxd.util.PK
+import cn.nizou.sxd.util.PageUrl
 import cn.nizou.sxd.util.PkBundlePatcher
 import cn.nizou.sxd.util.Simian
 import cn.nizou.sxd.util.XposedHelpers
@@ -184,30 +185,28 @@ class WebViewHook(
         loadUrl?.intercept("webapp_loadUrl") { chain ->
             val r = chain.proceed()
             val str = chain.getArg(0).toString()
+            // 诊断：每条真实页面加载都留痕（截断），便于真机核对 URL 形态
+            // （离线 webbundle 目录名带 _<版本号>，字面量匹配极易失效）。
+            if (!str.startsWith("javascript:") && !str.startsWith("data:")) {
+                logI("loadUrl >>> " + str.take(180))
+            }
             when {
                 str.startsWith("javascript:") -> Unit
-                // 3.94-3.13x 旧版 PK 对战页
-                str.contains("/bh5/leo-web-oral-pk/exercise.html") -> {
-                    logI("exercise.html loaded")
+                // PK 答题页：3.94-3.13x 的 exercise.html / 3.140+ 的 pk.html / animation-oral.html。
+                // 统一走 PageUrl（去 query/hash/_<版本号>），避免版本号夹在中间导致字面量永不命中。
+                PageUrl.isPkExercise(str) -> {
+                    logI("PK exercise page loaded: " + PageUrl.normalizePage(str))
                     hookConsoleLog()
                     pkPageLoaded.set(true)
                 }
 
-                // 3.140+ 新版 PK 对战页（leo-web-math-exercise 本地 bundle，Vue2.7）
-                str.contains("leo-web-math-exercise/animation-oral.html") ||
-                    str.contains("leo-web-oral-pk/animation-oral.html") -> {
-                    logI("animation-oral.html loaded")
-                    hookConsoleLog()
-                    pkPageLoaded.set(true)
-                }
-
-                str.contains("/bh5/leo-web-oral-pk/english-words.html") -> {
+                PageUrl.isEnglishWords(str) -> {
                     logI("english-words.html loaded")
                     hookConsoleLog()
                     pkPageLoaded.set(true)
                 }
 
-                str.contains("/bh5/leo-web-oral-pk/result.html") -> {
+                PageUrl.isPkResult(str) -> {
                     logI("result.html loaded")
                     hookConsoleLog()
                     resultPageLoaded.set(true)
