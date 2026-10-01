@@ -39,6 +39,17 @@ object ScorePump {
     @Volatile
     var stopped = false
 
+    /**
+     * 对局 id 的候选字段名（按优先级）。
+     *
+     * `uploadExamResult(examId, examVO)` 的第 1 参就是它，取自 ExamVO。
+     * 宿主历史上用 `idString`；新老版本可能叫别的，这里全列上并逐个尝试，
+     * 命中的字段名会写日志 —— 便于真机核对「对局 id 到底从哪来」。
+     */
+    private val EXAM_ID_FIELDS = listOf(
+        "idString", "examIdString", "examId", "id", "uuid", "examUuid",
+    )
+
     /** 请求停止当前 pumpToTarget 循环 */
     fun cancel() {
         stopped = true
@@ -103,7 +114,13 @@ object ScorePump {
                         examVO = scanned.second
                         logI("ScorePump: keypoint switched to $kp, continue pumping")
                     }
-                    val examId = XposedHelpers.getObjectField(examVO, "idString").toString()
+                    val examId = extractExamId(examVO)
+                    if (examId.isNullOrBlank()) {
+                        onDone(Result.failure(IllegalStateException(
+                            "第 ${rounds + 1} 局取不到对局 id（ExamVO 无 idString/id/examId），已刷 $rounds 局"
+                        )))
+                        return@thread
+                    }
                     buildFullCorrect(examVO)
                     if (!upload(examId, examVO)) {
                         onDone(
@@ -128,6 +145,29 @@ object ScorePump {
                 onDone(Result.failure(e))
             }
         }
+    }
+
+    /**
+     * 从 ExamVO 提取**对局 id**（`uploadExamResult(examId, ...)` 的第 1 个参数）。
+     *
+     * ## ★ 2026-10-01 加固：对局 id 的稳健获取
+     *
+     * 旧实现只试 `idString` 一个字段，一旦宿主换字段名（`idString` → `examId` / `id`
+     * / `examIdString`…）就会 `NoSuchField` 抛异常，整轮刷分直接中断。
+     *
+     * 现在按优先级逐个尝试，并把**实际命中的字段名**写进日志 ——
+     * 这样真机上「对局 id 从哪来」是可查证的，而不是靠猜。
+     */
+    private fun extractExamId(examVO: Any): String? {
+        for (field in EXAM_ID_FIELDS) {
+            val v = runCatching { XposedHelpers.getObjectField(examVO, field) }.getOrNull()
+            val s = v?.toString()?.trim()
+            if (!s.isNullOrBlank() && s != "null" && s != "0") {
+                logI("ScorePump: examId from field `$field` = $s")
+                return s
+            }
+        }
+        return null
     }
 
     /**
